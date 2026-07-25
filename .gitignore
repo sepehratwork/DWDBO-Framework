@@ -1,0 +1,23 @@
+cat << 'EOF' > .gitignore
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Data files (keep raw CSVs local to save space/bandwidth)
+data/*.csv
+!data/download_data.sh
+
+# PyTorch / IDE / OS settings
+*.pt
+*.pth
+.vscode/
+.idea/
+.DS_Store
+EOF
