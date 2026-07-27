@@ -1,71 +1,66 @@
 """
-Lower-Level CVaR-Based Risk Management Optimization.
-Performs real-time corrective power dispatch under short-term forecast uncertainty scenarios.
+Lower-Level Conditional Value-at-Risk (CVaR) Optimization Engine.
+Performs real-time risk-averse dispatch adjustments under short-term forecast errors
+as defined in Equations (16)-(18).
 """
 
 from typing import Tuple
 import numpy as np
 from scipy.optimize import minimize
-from config import RiskConfig
+from config import CVaRConfig
 
 
-class CVaRRiskOptimizer:
+class CVaRRealTimeOptimizer:
     """
-    Computes Conditional Value-at-Risk (CVaR) and optimizes lower-level 
-    short-term real-time power dispatch under renewable uncertainty scenarios.
+    Computes CVaR risk metric at confidence level alpha and optimizes short-term
+    BESS real-time balancing adjustments.
     """
 
-    def __init__(self, config: RiskConfig):
-        self.config = config
+    def __init__(self, config: CVaRConfig):
+        self.cfg = config
 
-    def generate_error_scenarios(self, base_p_short: float) -> np.ndarray:
-        """Generates stochastic forecast error scenarios using normal distribution."""
-        np.random.seed(42)
-        scenarios = np.random.normal(
-            loc=base_p_short, 
-            scale=abs(base_p_short) * self.config.error_std_dev + 1e-5, 
-            size=self.config.num_scenarios
-        )
+    def sample_forecast_error_scenarios(self, base_p_short: float) -> np.ndarray:
+        """Generates Gaussian stochastic forecast error scenarios (Eq. 18)."""
+        np.random.seed(100)
+        sigma = abs(base_p_short) * self.cfg.forecast_error_std + 1.0
+        scenarios = np.random.normal(loc=0.0, scale=sigma, size=self.cfg.num_scenarios)
         return scenarios
 
-    def optimize_cvar_dispatch(
-        self, base_operating_cost: float, p_short_scenarios: np.ndarray
-    ) -> Tuple[float, float, np.ndarray]:
+    def optimize_cvar_risk(
+        self, base_operating_cost: float, error_scenarios: np.ndarray
+    ) -> Tuple[float, float, float]:
         """
-        Solves CVaR risk minimization problem (Eq. 16-17).
+        Solves CVaR linear programming problem (Eq. 16-17).
 
-        :param base_operating_cost: Nominal operational cost from upper-level OPF ($).
-        :param p_short_scenarios: Generated short-term fluctuation scenarios (MW).
-        :return: Tuple of (cvar_value, var_threshold_zeta, adjusted_bess_power_array).
+        :param base_operating_cost: Upper-level expected cost ($).
+        :param error_scenarios: Short-term fluctuation scenario vector (MW).
+        :return: Tuple of (cvar_cost, expected_cost, var_threshold_zeta).
         """
-        num_scenarios = len(p_short_scenarios)
-        prob = 1.0 / num_scenarios
-        alpha = self.config.confidence_level_alpha
+        N_s = len(error_scenarios)
+        pi_s = 1.0 / N_s
+        alpha = self.cfg.confidence_level_alpha
 
-        # Scenario operational costs under short-term fluctuations
-        scenario_costs = base_operating_cost + p_short_scenarios * 15.0  # Marginal impact factor
+        # Scenario total operational cost impact
+        scenario_costs = base_operating_cost + error_scenarios * 12.5
 
-        # Objective formulation: min zeta + (1 / (1 - alpha)) * sum(prob * eta_s)
-        def cvar_objective(x):
+        # Decision variables: x = [zeta, eta_1, ..., eta_NS]
+        def cvar_obj(x):
             zeta = x[0]
             eta = x[1:]
-            return zeta + (1.0 / (1.0 - alpha)) * np.sum(prob * eta)
+            return zeta + (1.0 / (1.0 - alpha)) * np.sum(pi_s * eta)
 
-        # Constraints: eta_s >= C_s - zeta, eta_s >= 0
         constraints = []
-        for s in range(num_scenarios):
+        for s in range(N_s):
             constraints.append({'type': 'ineq', 'fun': lambda x, s=s: x[1 + s] - (scenario_costs[s] - x[0])})
 
-        bounds = [(None, None)] + [(0, None)] * num_scenarios
-        x0 = np.zeros(1 + num_scenarios)
+        bounds = [(None, None)] + [(0.0, None)] * N_s
+        x0 = np.zeros(1 + N_s)
         x0[0] = np.percentile(scenario_costs, alpha * 100)
 
-        res = minimize(cvar_objective, x0, method='SLSQP', bounds=bounds, constraints=constraints)
+        res = minimize(cvar_obj, x0, method='SLSQP', bounds=bounds, constraints=constraints)
 
-        zeta_opt = res.x[0] if res.success else float(x0[0])
-        cvar_opt = float(cvar_objective(res.x)) if res.success else float(x0[0])
-        
-        # Calculate real-time BESS compensation actions P_BESS_short
-        p_bess_adjustments = -p_short_scenarios
+        zeta_opt = float(res.x[0]) if res.success else float(x0[0])
+        cvar_cost = float(cvar_obj(res.x)) if res.success else float(x0[0])
+        expected_cost = float(np.mean(scenario_costs))
 
-        return cvar_opt, zeta_opt, p_bess_adjustments
+        return cvar_cost, expected_cost, zeta_opt

@@ -1,6 +1,7 @@
 """
-KNN Data Imputation Module.
-Handles missing value filling for time-series features (Load, Wind, Solar, Price).
+K-Nearest Neighbors (KNN) Data Imputation Module.
+Addresses missing values in multivariate time-series datasets (Demand, Wind, Solar, Price)
+preserving local temporal dynamics (Section 3.1).
 """
 
 import numpy as np
@@ -10,31 +11,32 @@ from sklearn.impute import KNNImputer
 
 class TimeSeriesKNNImputer:
     """
-    K-Nearest Neighbors Imputer tailored for power system multivariate time series data.
-    Preserves local dynamics and spatial/temporal correlations.
+    Implements KNN imputation using Euclidean distance across multivariate power system features.
     """
 
     def __init__(self, n_neighbors: int = 5, weights: str = "distance"):
         """
-        Initialize the KNN Imputer.
+        Initialize KNN Imputer.
 
-        :param n_neighbors: Number of neighboring samples to use for imputation.
-        :param weights: Weight function used in prediction ('uniform' or 'distance').
+        :param n_neighbors: Number of nearest neighbors to consider.
+        :param weights: Distance weighting scheme ('uniform' or 'distance').
         """
         self.n_neighbors = n_neighbors
         self.weights = weights
         self.imputer = KNNImputer(n_neighbors=self.n_neighbors, weights=self.weights)
 
-    def impute(self, df: pd.DataFrame) -> pd.DataFrame:
+    def impute_missing_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Fill missing values in the provided DataFrame using KNN Imputation.
+        Reconstructs missing data gaps while maintaining temporal continuity.
 
-        :param df: Input DataFrame with potential missing values (NaNs).
+        :param df: Raw input DataFrame containing potential NaNs.
         :return: Fully imputed DataFrame.
         """
-        feature_cols = df.select_dtypes(include=[np.number]).columns
-        imputed_array = self.imputer.fit_transform(df[feature_cols])
-        
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
         df_imputed = df.copy()
-        df_imputed[feature_cols] = imputed_array
+        
+        # Fit and transform numeric time series columns
+        imputed_matrix = self.imputer.fit_transform(df[numeric_cols])
+        df_imputed[numeric_cols] = imputed_matrix
+        
         return df_imputed

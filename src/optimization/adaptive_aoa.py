@@ -1,6 +1,7 @@
 """
 Adaptive Arithmetic Optimization Algorithm (Adaptive AOA).
-Upper-level solver for optimal BESS siting and sizing across network buses.
+Solves BESS placement and sizing problem with dynamic MOA and MOP schedules
+implementing Algorithm 1 (Page 6).
 """
 
 from typing import Tuple, List, Callable
@@ -10,79 +11,78 @@ from config import AOAConfig, BESSConfig
 
 class AdaptiveAOASolver:
     """
-    Adaptive Arithmetic Optimization Algorithm with time-varying MOA and MOP schedules.
-    Optimizes BESS location vectors L and capacity vectors S.
+    Implements Adaptive AOA for optimal BESS siting and sizing in transmission networks.
     """
 
-    def __init__(self, config: AOAConfig, bess_config: BESSConfig, num_bess_units: int = 2, total_buses: int = 30):
-        self.config = config
+    def __init__(self, config: AOAConfig, bess_config: BESSConfig, total_buses: int = 30):
+        self.cfg = config
         self.bess_cfg = bess_config
-        self.num_bess = num_bess_units
         self.total_buses = total_buses
-        self.dim = num_bess_units * 2  # Encoding: [L_1..L_N, S_1..S_N]
+        self.num_bess = bess_config.num_units
+        self.dim = self.num_bess * 2  # Vector X = [L_1, ..., L_N, S_1, ..., S_N] (Eq. 21)
 
-    def _initialize_population() -> np.ndarray:
-        pop = np.zeros((self.config.population_size, self.dim))
-        for i in range(self.config.population_size):
-            # Locations (bus indices 1 to 30)
-            pop[i, : self.num_bess] = np.random.choice(range(1, self.total_buses + 1), size=self.num_bess, replace=False)
-            # Capacities (MWh)
+    def _initialize_population(self) -> np.ndarray:
+        """Initializes population with spatial bus indices and continuous storage capacities."""
+        pop = np.zeros((self.cfg.population_size, self.dim))
+        for i in range(self.cfg.population_size):
+            # Spatial dimension L_i (Bus indices)
+            pop[i, : self.num_bess] = np.random.choice(
+                range(1, self.total_buses + 1), size=self.num_bess, replace=False
+            )
+            # Capacity dimension S_i (MWh)
             pop[i, self.num_bess :] = np.random.uniform(
-                self.bess_cfg.capacity_bounds_mwh[0], self.bess_cfg.capacity_bounds_mwh[1], size=self.num_bess
+                self.bess_cfg.capacity_min_mwh, self.bess_cfg.capacity_max_mwh, size=self.num_bess
             )
         return pop
 
-    def optimize(self, fitness_function: Callable[[np.ndarray], float]) -> Tuple[np.ndarray, float, List[float]]:
+    def optimize(self, fitness_func: Callable[[np.ndarray], float]) -> Tuple[np.ndarray, float, List[float]]:
         """
-        Executes adaptive AOA optimization loop.
+        Executes Algorithm 1 Adaptive AOA optimization process.
 
-        :param fitness_function: Objective evaluation function.
-        :return: Tuple of (best_solution, best_fitness, convergence_history).
+        :param fitness_func: Multi-objective evaluation function F_BESS (Eq. 22).
+        :return: Tuple of (best_candidate_X, best_fitness_value, convergence_curve).
         """
         pop = self._initialize_population()
-        fitness = np.array([fitness_function(ind) for ind in pop])
-        
+        fitness = np.array([fitness_func(ind) for ind in pop])
+
         best_idx = np.argmin(fitness)
         best_sol = pop[best_idx].copy()
         best_fit = fitness[best_idx]
 
-        convergence_history = [best_fit]
+        convergence_curve = [best_fit]
 
-        for t in range(1, self.config.max_iterations + 1):
-            # Dynamic coefficient updates (Eqs. 19 & 20)
-            moa = self.config.moa_min + t * ((self.config.moa_max - self.config.moa_min) / self.config.max_iterations)
-            mop = 1.0 - (t / self.config.max_iterations) ** (1.0 / self.config.alpha)
+        for t in range(1, self.cfg.max_iterations + 1):
+            # Dynamic MOA schedule (Eq. 19)
+            moa = self.cfg.moa_min + t * ((self.cfg.moa_max - self.cfg.moa_min) / self.cfg.max_iterations)
+            # Dynamic MOP schedule (Eq. 20)
+            mop = 1.0 - (t / self.cfg.max_iterations) ** (1.0 / self.cfg.alpha)
 
-            for i in range(self.config.population_size):
+            for i in range(self.cfg.population_size):
                 r1, r2 = np.random.rand(), np.random.rand()
                 
-                # Exploration Phase
-                if r1 < mop:
-                    if r2 > 0.5:
-                        pop[i, :] = best_sol + r2 * (best_sol - pop[i, :]) * moa
-                    else:
-                        pop[i, :] = best_sol - r2 * (best_sol - pop[i, :]) * moa
-                # Exploitation Phase
-                else:
-                    if r2 > 0.5:
-                        pop[i, :] = best_sol * r2 * moa
-                    else:
-                        pop[i, :] = best_sol / (moa + 1e-8)
+                x_new = pop[i, :].copy()
 
-                # Boundary enforcing
-                pop[i, : self.num_bess] = np.clip(np.round(pop[i, : self.num_bess]), 1, self.total_buses)
-                pop[i, self.num_bess :] = np.clip(
-                    pop[i, self.num_bess :], self.bess_cfg.capacity_bounds_mwh[0], self.bess_cfg.capacity_bounds_mwh[1]
+                # Exploration Phase (Algorithm 1)
+                if r1 < mop:
+                    x_new = pop[i, :] + r2 * (best_sol - pop[i, :]) * moa
+                # Exploitation Phase (Algorithm 1)
+                else:
+                    x_new = best_sol + r2 * (best_sol - pop[i, :])
+
+                # Enforce physical constraints and integer bus bounds
+                x_new[: self.num_bess] = np.clip(np.round(x_new[: self.num_bess]), 1, self.total_buses)
+                x_new[self.num_bess :] = np.clip(
+                    x_new[self.num_bess :], self.bess_cfg.capacity_min_mwh, self.bess_cfg.capacity_max_mwh
                 )
 
-                # Fitness evaluation
-                fit = fitness_function(pop[i, :])
-                if fit < fitness[i]:
-                    fitness[i] = fit
-                    if fit < best_fit:
-                        best_fit = fit
-                        best_sol = pop[i, :].copy()
+                fit_new = fitness_func(x_new)
+                if fit_new < fitness[i]:
+                    pop[i, :] = x_new
+                    fitness[i] = fit_new
+                    if fit_new < best_fit:
+                        best_fit = fit_new
+                        best_sol = x_new.copy()
 
-            convergence_history.append(best_fit)
+            convergence_curve.append(best_fit)
 
-        return best_sol, best_fit, convergence_history
+        return best_sol, best_fit, convergence_curve
