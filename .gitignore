@@ -11,7 +11,7 @@ ENV/
 env/
 
 # Data files (keep raw CSVs local to save space/bandwidth)
-data/*.csv
+data/*
 !data/download_data.sh
 
 # PyTorch / IDE / OS settings
