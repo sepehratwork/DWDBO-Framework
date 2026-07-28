@@ -78,7 +78,7 @@ class TFTTrainerEngine:
         # Training Loop
         self.model.train()
         for epoch in range(epochs):
-            for xl, xs, yl, ys in train_loader:
+            for i, (xl, xs, yl, ys) in enumerate(train_loader):
                 xl, xs, yl, ys = xl.to(self.device), xs.to(self.device), yl.to(self.device), ys.to(self.device)
                 optimizer.zero_grad()
                 pred_l, pred_s = self.model(xl, xs)
@@ -90,6 +90,7 @@ class TFTTrainerEngine:
                 loss = criterion(pred_l_flat, yl) + criterion(pred_s_flat, ys)
                 loss.backward()
                 optimizer.step()
+                print(f"Epoch: {epoch+1}/{epochs} | Iteration: {i} | loss: {loss}")
 
         # Testing & Evaluation
         self.model.eval()
@@ -101,14 +102,13 @@ class TFTTrainerEngine:
             pred_l_np = pred_l.cpu().numpy().reshape(-1)
             pred_s_np = pred_s.cpu().numpy().reshape(-1)
 
+
         y_actual = Y_l[split_idx:] + Y_s[split_idx:]
         y_pred = pred_l_np + pred_s_np
 
         mae = float(mean_absolute_error(y_actual, y_pred))
         rmse = float(np.sqrt(mean_squared_error(y_actual, y_pred)))
         r2 = float(r2_score(y_actual, y_pred))
-
-        print(f"[{epoch+1}/{epochs}] | loss: {loss}, MAE: {mae}, RMSE: {rmse}, R2: {r2}")
 
         metrics = {"MAE": mae, "RMSE": rmse, "R2": r2}
         return metrics, pred_l_np, pred_s_np
