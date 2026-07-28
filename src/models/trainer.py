@@ -20,18 +20,25 @@ class TFTTrainerEngine:
 
     def __init__(self, config: TFTConfig):
         self.cfg = config
+        
+        # Hyperparameters with default fallbacks matching Table 2 of the paper
+        hidden_dim = getattr(config, "hidden_dim", getattr(config, "hidden_layer_dimensions", 32))
+        num_heads = getattr(config, "attention_heads", 2)
+        num_layers = getattr(config, "num_layers", getattr(config, "number_of_layers", 2))
+        dropout_rate = getattr(config, "dropout_rate", 0.12)
+        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = DualPathTFTModel(
-            hidden_dim=config.hidden_dim,
-            num_heads=config.attention_heads,
-            num_layers=config.num_layers,
-            dropout_rate=config.dropout_rate
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout_rate=dropout_rate
         ).to(self.device)
 
     def _build_sliding_windows(self, series: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Creates sliding historical lookback windows and future step targets."""
         X, Y = [], []
-        w = self.cfg.lookback_window
+        w = getattr(self.cfg, "lookback_window", getattr(self.cfg, "sliding_window", 48))
         for i in range(len(series) - w):
             X.append(series[i : i + w])
             Y.append(series[i + w])
@@ -48,7 +55,9 @@ class TFTTrainerEngine:
         X_l, Y_l = self._build_sliding_windows(p_long)
         X_s, Y_s = self._build_sliding_windows(p_short)
 
-        split_idx = int(len(X_l) * self.cfg.train_split)
+        # 80% Train / 20% Test split as specified in paper Section 3.2
+        train_split = getattr(self.cfg, "train_split", getattr(self.cfg, "train_ratio", 0.80))
+        split_idx = int(len(X_l) * train_split)
 
         # Datasets
         train_ds = TensorDataset(
@@ -57,19 +66,28 @@ class TFTTrainerEngine:
             torch.FloatTensor(Y_l[:split_idx]),
             torch.FloatTensor(Y_s[:split_idx])
         )
-        train_loader = DataLoader(train_ds, batch_size=self.cfg.batch_size, shuffle=True)
+        batch_size = getattr(self.cfg, "batch_size", 128)
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.learning_rate)
+        learning_rate = getattr(self.cfg, "learning_rate", 0.001)
+        epochs = getattr(self.cfg, "training_epochs", getattr(self.cfg, "epochs", 150))
+
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         criterion = nn.MSELoss()
 
         # Training Loop
         self.model.train()
-        for epoch in range(self.cfg.training_epochs):
+        for epoch in range(epochs):
             for xl, xs, yl, ys in train_loader:
                 xl, xs, yl, ys = xl.to(self.device), xs.to(self.device), yl.to(self.device), ys.to(self.device)
                 optimizer.zero_grad()
                 pred_l, pred_s = self.model(xl, xs)
-                loss = criterion(pred_l, yl) + criterion(pred_s, ys)
+                
+                # Reshape to 1D to prevent broadcast mismatch in loss calculation
+                pred_l_flat = pred_l.squeeze(-1) if pred_l.dim() > 1 else pred_l
+                pred_s_flat = pred_s.squeeze(-1) if pred_s.dim() > 1 else pred_s
+                
+                loss = criterion(pred_l_flat, yl) + criterion(pred_s_flat, ys)
                 loss.backward()
                 optimizer.step()
 
@@ -80,15 +98,15 @@ class TFTTrainerEngine:
             test_xs = torch.FloatTensor(X_s[split_idx:]).to(self.device)
             pred_l, pred_s = self.model(test_xl, test_xs)
 
-            pred_l_np = pred_l.cpu().numpy()
-            pred_s_np = pred_s.cpu().numpy()
+            pred_l_np = pred_l.cpu().numpy().reshape(-1)
+            pred_s_np = pred_s.cpu().numpy().reshape(-1)
 
         y_actual = Y_l[split_idx:] + Y_s[split_idx:]
         y_pred = pred_l_np + pred_s_np
 
-        mae = mean_absolute_error(y_actual, y_pred)
-        rmse = np.sqrt(mean_squared_error(y_actual, y_pred))
-        r2 = r2_score(y_actual, y_pred)
+        mae = float(mean_absolute_error(y_actual, y_pred))
+        rmse = float(np.sqrt(mean_squared_error(y_actual, y_pred)))
+        r2 = float(r2_score(y_actual, y_pred))
 
         metrics = {"MAE": mae, "RMSE": rmse, "R2": r2}
         return metrics, pred_l_np, pred_s_np

@@ -34,7 +34,7 @@ def generate_opsd_time_series(num_samples: int = 5000) -> pd.DataFrame:
 
 def main():
     print("==========================================================================================")
-    print(" Deep-Based Wavelet-Driven Bi-Level Optimization (DWDBO) Framework")
+    print(" Deep-Learning-Based Wavelet-Driven Bi-Level Optimization (DWDBO) Framework")
     print("==========================================================================================\n")
 
     # Generate synthetic dataset

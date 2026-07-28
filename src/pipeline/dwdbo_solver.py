@@ -44,7 +44,16 @@ class DWDBOMasterFramework:
 
         # Step 1: Missing Data Imputation
         df_clean = self.imputer.impute_missing_data(df_raw)
-        res_signal = df_clean["wind_power"].values
+        
+        # Combine renewable power profiles (PV + Wind) as specified in paper (Eq. 4)
+        if "wind_power" in df_clean.columns and "solar_power" in df_clean.columns:
+            res_signal = df_clean["wind_power"].fillna(0).values + df_clean["solar_power"].fillna(0).values
+        elif "wind_power" in df_clean.columns:
+            res_signal = df_clean["wind_power"].values
+        elif "solar_power" in df_clean.columns:
+            res_signal = df_clean["solar_power"].values
+        else:
+            res_signal = df_clean.iloc[:, 0].values
 
         # Step 2: DWT Signal Decomposition
         p_long, p_short, depth_J = self.decomposer.decompose_signal(res_signal)
@@ -56,23 +65,26 @@ class DWDBOMasterFramework:
 
         # Horizon vectors
         T = scheduling_horizon_hours
-        demand_h = np.full(T, self.sys_data.base_demand)
+        base_demand = getattr(self.sys_data, "base_demand", 180.0)
+        demand_h = np.full(T, base_demand)
         p_long_h = pred_long[:T]
         p_short_h = pred_short[:T]
 
+        num_units = getattr(self.bess_cfg, "num_units", 2)
+
         # Step 4: Upper-Level Adaptive AOA Optimization
         def multi_objective_fitness(X: np.ndarray) -> float:
-            buses = X[: self.bess_cfg.num_units].astype(int)
-            capacities = X[self.bess_cfg.num_units :]
+            buses = X[: num_units].astype(int)
+            capacities = X[num_units :]
             
             c_op, c_bess, v_dev, l_loss = self.opf_solver.solve_multi_period_dispatch(
                 T, demand_h, p_long_h, buses, capacities
             )
-            c_inv = np.sum(capacities) * 15.0  # Investment cost proxy
+            c_inv = float(np.sum(capacities) * 15.0)  # Investment cost proxy
             
-            w = self.aoa_cfg.weights
+            w = getattr(self.aoa_cfg, "weights", [0.4, 0.2, 0.2, 0.2])
             fitness = w[0] * c_op + w[1] * c_inv + w[2] * v_dev * 100.0 + w[3] * l_loss * 100.0
-            return fitness
+            return float(fitness)
 
         # Bi-level iterative convergence loop (Eq. 23)
         prev_fitness = float("inf")
@@ -80,25 +92,30 @@ class DWDBOMasterFramework:
         best_fitness = float("inf")
         conv_history = []
 
-        for outer_iter in range(1, self.conv_cfg.max_outer_iterations + 1):
+        max_outer_iter = getattr(self.conv_cfg, "max_outer_iterations", 10)
+        eps_stab = getattr(self.conv_cfg, "epsilon_stabilizer", 1e-8)
+        tau_tol = getattr(self.conv_cfg, "tau_tolerance", 1e-6)
+
+        for outer_iter in range(1, max_outer_iter + 1):
             best_X, best_fitness, curve = self.aoa_solver.optimize(multi_objective_fitness)
             conv_history.extend(curve)
 
-            # Stopping condition check (Eq. 23)
-            rel_improvement = abs(best_fitness - prev_fitness) / (prev_fitness + self.conv_cfg.epsilon_stabilizer)
-            if rel_improvement < self.conv_cfg.tau_tolerance:
-                print(f"Bi-Level Framework Converged at Outer Iteration {outer_iter} (Ratio < 1e-6)")
-                break
+            # Stopping condition check (Eq. 23) - Safe evaluation preventing Inf/NaN issues
+            if outer_iter > 1 and prev_fitness < float("inf"):
+                rel_improvement = abs(best_fitness - prev_fitness) / (prev_fitness + eps_stab)
+                if rel_improvement < tau_tol:
+                    print(f"Bi-Level Framework Converged at Outer Iteration {outer_iter} (Ratio < 1e-6)")
+                    break
             prev_fitness = best_fitness
 
-        opt_buses = best_X[: self.bess_cfg.num_units].astype(int)
-        opt_capacities = best_X[self.bess_cfg.num_units :]
+        opt_buses = best_X[: num_units].astype(int)
+        opt_capacities = best_X[num_units :]
 
         # Step 5: Lower-Level CVaR Risk Optimization
         c_op_opt, _, _, _ = self.opf_solver.solve_multi_period_dispatch(
             T, demand_h, p_long_h, opt_buses, opt_capacities
         )
-        error_scenarios = self.cvar_optimizer.sample_forecast_error_scenarios(np.mean(p_short_h))
+        error_scenarios = self.cvar_optimizer.sample_forecast_error_scenarios(float(np.mean(p_short_h)))
         cvar_cost, exp_cost, zeta = self.cvar_optimizer.optimize_cvar_risk(c_op_opt, error_scenarios)
 
         return {

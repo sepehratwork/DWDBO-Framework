@@ -93,35 +93,35 @@ The DWDBO model decouples strategic planning decisions from operational dispatch
 
 ### 1. Data Imputation & Signal Decomposition
 Raw time-series from the ENTSO-E platform processed via Open Power System Data (OPSD) contain missing entries filled via distance-weighted K-Nearest Neighbors (KNN). Cleaned signals $x[n]$ undergo Discrete Wavelet Transform (DWT):
-$$W_\psi(j,k) = \frac{1}{\sqrt{2^j}} \sum_n x[n] \psi^*\left(\frac{n - 2^j k}{2^j}\right)$$
+$W_\psi(j,k) = \frac{1}{\sqrt{2^j}} \sum_n x[n] \psi^*\left(\frac{n - 2^j k}{2^j}\right)$
 
-$$P_{\text{RES}}[n] = P_{\text{RES}}^{\text{long}}[n] + P_{\text{RES}}^{\text{short}}[n]$$
+$P_{\text{RES}}[n] = P_{\text{RES}}^{\text{long}}[n] + P_{\text{RES}}^{\text{short}}[n]$
 
 where $P_{\text{RES}}^{\text{long}}[n] = \sum_k cA_J[k] \phi_{J,k}[n]$ represents smooth trends, and $P_{\text{RES}}^{\text{short}}[n] = \sum_{j=1}^J \sum_k cD_j[k] \psi_{j,k}[n]$ represents high-frequency volatility.
 
 ### 2. Dual-Path Temporal Fusion Transformer (TFT)
 Separate TFT models process static context information $c_s$ and dynamic temporal sequences $\xi_t$ via Gated Residual Networks (GRN) and Gated Linear Units (GLU):
-$$\tilde{\xi}_t = \text{GLU}(\text{GRN}_\xi(\xi_t, c_s)) \odot \xi_t$$
+$\tilde{\xi}_t = \text{GLU}(\text{GRN}_\xi(\xi_t, c_s)) \odot \xi_t$
 
 Independent transformer paths yield:
-$$\hat{P}_{t+h}^{\text{long}} = \text{TFT}_{\text{long}}\left(P_{t-\tau:t}^{\text{long}}\right), \quad \hat{P}_{t+h}^{\text{short}} = \text{TFT}_{\text{short}}\left(P_{t-\tau:t}^{\text{short}}\right)$$
+$\hat{P}_{t+h}^{\text{long}} = \text{TFT}_{\text{long}}\left(P_{t-\tau:t}^{\text{long}}\right), \quad \hat{P}_{t+h}^{\text{short}} = \text{TFT}_{\text{short}}\left(P_{t-\tau:t}^{\text{short}}\right)$
 
 ### 3. Upper-Level Optimization: BESS Planning via Adaptive AOA
 The upper-level objective minimizes total operational costs, investment costs, voltage deviations, and grid line losses:
-$$\min_{P_G, P_{\text{BESS}}} C_{op} = \sum_{t,g} \left( a_g P_{G,g}(t)^2 + b_g P_{G,g}(t) + c_g \right) + \sum_{t,b} C_{\text{BESS},b} |P_{\text{BESS},b}(t)|$$
+$\min_{P_G, P_{\text{BESS}}} C_{op} = \sum_{t,g} \left( a_g P_{G,g}(t)^2 + b_g P_{G,g}(t) + c_g \right) + \sum_{t,b} C_{\text{BESS},b} |P_{\text{BESS},b}(t)|$
 
-$$\text{Fitness } F_{\text{BESS}} = w_1 C_{op} + w_2 C_{inv} + w_3 V_{dev} + w_4 L_{loss}$$
+$\text{Fitness } F_{\text{BESS}} = w_1 C_{op} + w_2 C_{inv} + w_3 V_{dev} + w_4 L_{loss}$
 
 Siting vector $X = [L_1, \dots, L_{N_{\text{BESS}}}, S_1, \dots, S_{N_{\text{BESS}}}]$ is navigated using adaptive AOA coefficient updates:
-$$\text{MOA}(t) = \text{MOA}_{\min} + \frac{(\text{MOA}_{\max} - \text{MOA}_{\min}) t}{T_{\max}}$$
+$\text{MOA}(t) = \text{MOA}_{\min} + \frac{(\text{MOA}_{\max} - \text{MOA}_{\min}) t}{T_{\max}}$
 
-$$\text{MOP}(t) = 1 - \left( \frac{t}{T_{\max}} \right)^{1/\alpha}$$
+$\text{MOP}(t) = 1 - \left( \frac{t}{T_{\max}} \right)^{1/\alpha}$
 
 ### 4. Lower-Level Optimization: CVaR-Aided Real-Time Dispatch
 The lower-level corrects for real-time short-term deviations $\Delta P^{\text{short}}$ using Conditional Value-at-Risk (CVaR) at confidence level $\alpha$:
-$$\min_{\zeta, \eta_s} \text{CVaR}_\alpha = \zeta + \frac{1}{1 - \alpha} \sum_{s=1}^{N_S} \pi_s \eta_s$$
+$\min_{\zeta, \eta_s} \text{CVaR}_\alpha = \zeta + \frac{1}{1 - \alpha} \sum_{s=1}^{N_S} \pi_s \eta_s$
 
-$$\text{Subject to: } \eta_s \ge C_s - \zeta, \quad \eta_s \ge 0, \quad \epsilon_{r,s}(t) \sim \mathcal{N}\left(0, \sigma_r^2(t)\right)$$
+$\text{Subject to: } \eta_s \ge C_s - \zeta, \quad \eta_s \ge 0, \quad \epsilon_{r,s}(t) \sim \mathcal{N}\left(0, \sigma_r^2(t)\right)$
 
 ---
 
@@ -131,7 +131,6 @@ The code implementation strictly reflects the file layout below:
 
 ```text
 DWDBO-Framework/
-├── .vscode/                   # Local IDE settings
 ├── data/                      # Raw and processed time-series datasets
 ├── src/                       # Source modules
 │   ├── data_processing/       # Data cleaning, imputation, and signal processing
@@ -278,7 +277,7 @@ If you find this repository or paper useful in your research, please cite:
 ```bibtex
 @article{DWDBO2026,
   title     = {A Wavelet-Driven Bi-Level Optimization Framework for Battery Energy Storage System and Renewable Energy Planning under CVaR-Based Risk Management},
-  author    = {Sepehr at Work et al.},
+  author    = {Saeed Abazari, Ali Abdollahi, Sepehr Kerachi},
   journal   = {IEEE Transactions / Energy Systems},
   year      = {2026},
   publisher = {IEEE}
