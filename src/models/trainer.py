@@ -108,5 +108,7 @@ class TFTTrainerEngine:
         rmse = float(np.sqrt(mean_squared_error(y_actual, y_pred)))
         r2 = float(r2_score(y_actual, y_pred))
 
+        print(f"[{epoch+1}/{epochs}] | loss: {loss}, MAE: {mae}, RMSE: {rmse}, R2: {r2}")
+
         metrics = {"MAE": mae, "RMSE": rmse, "R2": r2}
         return metrics, pred_l_np, pred_s_np
