@@ -6,6 +6,7 @@ and executes complete end-to-end framework execution using clean package imports
 
 from typing import Dict, Any
 import numpy as np
+from tqdm import tqdm
 
 from config import (
     DatasetConfig, TFTConfig, BESSConfig, AOAConfig, CVaRConfig, ConvergenceConfig
@@ -47,13 +48,13 @@ class DWDBOMasterFramework:
         
         # Combine renewable power profiles (PV + Wind) as specified in paper (Eq. 4)
         if "wind_power" in df_clean.columns and "solar_power" in df_clean.columns:
-            res_signal = df_clean["wind_power"].fillna(0).values + df_clean["solar_power"].fillna(0).values
+            res_signal = df_clean["wind_power"].fillna(0).to_numpy() + df_clean["solar_power"].fillna(0).to_numpy()
         elif "wind_power" in df_clean.columns:
-            res_signal = df_clean["wind_power"].values
+            res_signal = df_clean["wind_power"].to_numpy()
         elif "solar_power" in df_clean.columns:
-            res_signal = df_clean["solar_power"].values
+            res_signal = df_clean["solar_power"].to_numpy()
         else:
-            res_signal = df_clean.iloc[:, 0].values
+            res_signal = df_clean.iloc[:, 0].to_numpy()
 
         # Step 2: DWT Signal Decomposition
         p_long, p_short, depth_J = self.decomposer.decompose_signal(res_signal)
@@ -96,7 +97,7 @@ class DWDBOMasterFramework:
         eps_stab = getattr(self.conv_cfg, "epsilon_stabilizer", 1e-8)
         tau_tol = getattr(self.conv_cfg, "tau_tolerance", 1e-6)
 
-        for outer_iter in range(1, max_outer_iter + 1):
+        for outer_iter in tqdm(range(1, max_outer_iter + 1), desc="AOA Solver"):
             best_X, best_fitness, curve = self.aoa_solver.optimize(multi_objective_fitness)
             conv_history.extend(curve)
 

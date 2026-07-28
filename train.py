@@ -4,6 +4,8 @@ Simulates Open Power System Data (OPSD), initializes the DWDBO pipeline,
 and displays results matching Tables 3-6 of the paper.
 """
 
+import time
+import torch
 import numpy as np
 import pandas as pd
 from src.pipeline import DWDBOMasterFramework
@@ -37,6 +39,15 @@ def main():
     print(" Deep-Learning-Based Wavelet-Driven Bi-Level Optimization (DWDBO) Framework")
     print("==========================================================================================\n")
 
+    # Hardware acceleration summary
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name(0)
+        print(f"Hardware Acceleration: GPU Enabled ({device_name})\n")
+    else:
+        print("Hardware Acceleration: CPU Mode\n")
+
+    start_time = time.perf_counter()
+
     # Generate synthetic dataset
     raw_opsd_data = generate_opsd_time_series(num_samples=5000)
 
@@ -45,6 +56,8 @@ def main():
 
     # Execute 24-Hour Horizon Pipeline
     results = solver.execute_framework(raw_opsd_data, scheduling_horizon_hours=24)
+
+    total_time = time.perf_counter() - start_time
 
     print("\n------------------------------------------------------------------------------------------")
     print(" SIMULATION SUMMARY RESULTS ")
@@ -55,6 +68,7 @@ def main():
     print(f"Expected System Cost ($)       : ${results['expected_cost']:.2f}")
     print(f"CVaR Risk Cost (Alpha=0.95) ($): ${results['cvar_cost']:.2f}")
     print(f"Value-at-Risk Threshold ($)    : ${results['var_threshold_zeta']:.2f}")
+    print(f"Total Pipeline Execution Time  : {total_time:.2f} seconds")
     print("==========================================================================================")
 
 
