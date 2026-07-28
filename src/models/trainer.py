@@ -132,9 +132,8 @@ class TFTTrainerEngine:
                 running_loss += loss.item()
 
             # Periodic logging eliminates stdio buffering overheads
-            if (epoch + 1) % 25 == 0 or epoch == 0 or epoch == (epochs - 1):
-                avg_loss = running_loss / len(train_loader)
-                print(f"Epoch: {epoch+1:3d}/{epochs} | Loss: {avg_loss:.6f}")
+            avg_loss = running_loss / len(train_loader)
+            print(f"Epoch: {epoch+1:3d}/{epochs} | Loss: {avg_loss:.6f}")
 
         # Testing & Evaluation
         self.model.eval()
