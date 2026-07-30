@@ -4,7 +4,7 @@ Performs real-time risk-averse dispatch adjustments under short-term forecast er
 as defined in Equations (16)-(18) with parallel sensitivity evaluations.
 """
 
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 import numpy as np
 from scipy.optimize import minimize
 from joblib import Parallel, delayed

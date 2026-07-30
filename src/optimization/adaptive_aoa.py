@@ -4,7 +4,7 @@ Parallelized implementation of BESS placement and sizing problem with dynamic
 MOA and MOP schedules executing Algorithm 1 (Page 6).
 """
 
-from typing import Tuple, List, Callable
+from typing import Tuple, List, Callable, Optional
 import numpy as np
 from joblib import Parallel, delayed
 
