@@ -1,13 +1,16 @@
 """
 Main Execution Script.
-Simulates Open Power System Data (OPSD), initializes the DWDBO pipeline, 
-and displays results matching Tables 3-6 of the paper.
+Simulates Open Power System Data (OPSD), initializes the DWDBO pipeline,
+executes parallel multi-core optimization, saves checkpoints, and outputs all
+figures and tables matching the paper.
 """
 
 import time
 import torch
 import numpy as np
 import pandas as pd
+
+from config import ParallelConfig, CacheConfig, OutputConfig
 from src.pipeline import DWDBOMasterFramework
 
 
@@ -39,22 +42,29 @@ def main():
     print(" Deep-Learning-Based Wavelet-Driven Bi-Level Optimization (DWDBO) Framework")
     print("==========================================================================================\n")
 
-    # Hardware acceleration summary
-    if torch.cuda.is_available():
-        device_name = torch.cuda.get_device_name(0)
-        print(f"Hardware Acceleration: GPU Enabled ({device_name})\n")
-    else:
-        print("Hardware Acceleration: CPU Mode\n")
+    # Global Parallel & System Settings
+    parallel_cfg = ParallelConfig(num_workers=-1)  # Read all physical CPU cores
+    cache_cfg = CacheConfig(enable_cache=True, cache_dir="cache")
+    output_cfg = OutputConfig(results_dir="results", export_figures=True, export_tables=True)
+
+    effective_workers = parallel_cfg.get_effective_workers()
+    print(f"[System Config] Parallelization Workers Active: {effective_workers} Cores")
+    print(f"[System Config] Step Caching Enabled: {cache_cfg.enable_cache} ('{cache_cfg.cache_dir}/')")
+    print(f"[System Config] Output Results Directory: '{output_cfg.results_dir}/'\n")
 
     start_time = time.perf_counter()
 
-    # Generate synthetic dataset
+    # Generate or load dataset
     raw_opsd_data = generate_opsd_time_series(num_samples=5000)
 
-    # Initialize DWDBO Solver
-    solver = DWDBOMasterFramework()
+    # Initialize DWDBO Solver Engine
+    solver = DWDBOMasterFramework(
+        parallel_cfg=parallel_cfg,
+        cache_cfg=cache_cfg,
+        output_cfg=output_cfg
+    )
 
-    # Execute 24-Hour Horizon Pipeline
+    # Execute Complete 24-Hour Pipeline
     results = solver.execute_framework(raw_opsd_data, scheduling_horizon_hours=24)
 
     total_time = time.perf_counter() - start_time

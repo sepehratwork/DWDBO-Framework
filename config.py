@@ -1,11 +1,42 @@
 """
 Global Configuration File for DWDBO Framework.
-Contains exact hyperparameters, physical parameters, and optimization bounds 
-specified throughout the paper.
+Contains exact hyperparameters, physical parameters, parallelization settings,
+cache options, and output configurations specified throughout the paper.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Tuple, List
+
+
+@dataclass
+class ParallelConfig:
+    """Parallelization configuration for multi-core acceleration."""
+    # Setting num_workers to -1 automatically utilizes all available CPU cores
+    num_workers: int = -1
+    use_multiprocessing: bool = True
+
+    def get_effective_workers(self) -> int:
+        """Resolves negative worker counts to physical CPU core limits."""
+        if self.num_workers <= 0:
+            return max(1, os.cpu_count() - 2)
+        return self.num_workers
+
+
+@dataclass
+class CacheConfig:
+    """Disk caching configuration to support checkpoint resumption."""
+    enable_cache: bool = True
+    cache_dir: str = "cache"
+
+
+@dataclass
+class OutputConfig:
+    """Output directory and visualization export settings."""
+    results_dir: str = "results"
+    export_figures: bool = True
+    export_tables: bool = True
+    figure_dpi: int = 300
 
 
 @dataclass
@@ -54,16 +85,18 @@ class AOAConfig:
     moa_min: float = 0.2
     moa_max: float = 0.9
     alpha: float = 5.0  # Regulates decay profile of MOP(t)
-    # Weights for multi-objective fitness function F_BESS = w1*Cop + w2*Cinv + w3*Vdev + w4*Lloss
     weights: Tuple[float, float, float, float] = (0.50, 0.20, 0.15, 0.15)
 
 
 @dataclass
 class CVaRConfig:
     """Lower-level Conditional Value-at-Risk parameters (Section 2.5, Section 3.5)."""
-    confidence_level_alpha: float = 0.95  # Confidence level alpha (tested across 0.90, 0.95, 0.99)
+    confidence_level_alpha: float = 0.95
+    alpha_sensitivity_levels: List[float] = field(
+        default_factory=lambda: [0.75, 0.80, 0.85, 0.90, 0.95, 0.98, 0.99]
+    )
     num_scenarios: int = 100
-    forecast_error_std: float = 0.05      # Zero-mean Gaussian error variance proxy
+    forecast_error_std: float = 0.05
 
 
 @dataclass

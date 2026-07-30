@@ -1,25 +1,39 @@
 """
 Adaptive Arithmetic Optimization Algorithm (Adaptive AOA).
-Solves BESS placement and sizing problem with dynamic MOA and MOP schedules
-implementing Algorithm 1 (Page 6).
+Parallelized implementation of BESS placement and sizing problem with dynamic 
+MOA and MOP schedules executing Algorithm 1 (Page 6).
 """
 
 from typing import Tuple, List, Callable
 import numpy as np
-from config import AOAConfig, BESSConfig
+from joblib import Parallel, delayed
+
+from config import AOAConfig, BESSConfig, ParallelConfig
 
 
 class AdaptiveAOASolver:
     """
-    Implements Adaptive AOA for optimal BESS siting and sizing in transmission networks.
+    Implements Adaptive AOA for optimal BESS siting and sizing in transmission networks
+    with parallelized population evaluations.
     """
 
-    def __init__(self, config: AOAConfig, bess_config: BESSConfig, total_buses: int = 30):
+    def __init__(self, config: AOAConfig, bess_config: BESSConfig, total_buses: int = 30,
+                 parallel_config: Optional[ParallelConfig] = None):
+        """
+        Initialize Adaptive AOA Solver.
+
+        :param config: AOA hyperparameters configuration.
+        :param bess_config: BESS physical capacity bounds configuration.
+        :param total_buses: Number of power system network buses.
+        :param parallel_config: Parallel execution parameters.
+        """
         self.cfg = config
         self.bess_cfg = bess_config
         self.total_buses = total_buses
         self.num_bess = bess_config.num_units
         self.dim = self.num_bess * 2  # Vector X = [L_1, ..., L_N, S_1, ..., S_N] (Eq. 21)
+        self.parallel_cfg = parallel_config or ParallelConfig()
+        self.n_workers = self.parallel_cfg.get_effective_workers()
 
     def _initialize_population(self) -> np.ndarray:
         """Initializes population with spatial bus indices and continuous storage capacities."""
@@ -35,6 +49,22 @@ class AdaptiveAOASolver:
             )
         return pop
 
+    def _evaluate_population_parallel(self, pop: np.ndarray, fitness_func: Callable[[np.ndarray], float]) -> np.ndarray:
+        """
+        Parallelized fitness function evaluation across candidate solutions.
+
+        :param pop: Candidate population matrix.
+        :param fitness_func: Multi-objective fitness function.
+        :return: Array of fitness scores.
+        """
+        if self.n_workers > 1:
+            fitness = Parallel(n_jobs=self.n_workers)(
+                delayed(fitness_func)(ind) for ind in pop
+            )
+            return np.array(fitness)
+        else:
+            return np.array([fitness_func(ind) for ind in pop])
+
     def optimize(self, fitness_func: Callable[[np.ndarray], float]) -> Tuple[np.ndarray, float, List[float]]:
         """
         Executes Algorithm 1 Adaptive AOA optimization process.
@@ -43,7 +73,7 @@ class AdaptiveAOASolver:
         :return: Tuple of (best_candidate_X, best_fitness_value, convergence_curve).
         """
         pop = self._initialize_population()
-        fitness = np.array([fitness_func(ind) for ind in pop])
+        fitness = self._evaluate_population_parallel(pop, fitness_func)
 
         best_idx = np.argmin(fitness)
         best_sol = pop[best_idx].copy()
@@ -59,7 +89,6 @@ class AdaptiveAOASolver:
 
             for i in range(self.cfg.population_size):
                 r1, r2 = np.random.rand(), np.random.rand()
-                
                 x_new = pop[i, :].copy()
 
                 # Exploration Phase (Algorithm 1)
