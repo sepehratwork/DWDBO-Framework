@@ -57,6 +57,7 @@ class DWDBOMasterFramework:
         print(f"\n--- Executing DWDBO Pipeline ({scheduling_horizon_hours}-Hour Horizon) ---")
 
         # Step 1: Missing Data Imputation (With Cache)
+        print("Step 1: Missing Data Imputation")
         cache_key_imp = "step1_imputed_dataframe"
         if self.cache.exists(cache_key_imp):
             df_clean = self.cache.load(cache_key_imp)
@@ -73,6 +74,7 @@ class DWDBOMasterFramework:
             res_signal = df_clean.iloc[:, 0].to_numpy()
 
         # Step 2: DWT Decomposition (With Cache)
+        print("Step 2: DWT Decomposition")
         cache_key_dwt = "step2_dwt_decomposed_signals"
         if self.cache.exists(cache_key_dwt):
             p_long, p_short, depth_J = self.cache.load(cache_key_dwt)
@@ -81,6 +83,7 @@ class DWDBOMasterFramework:
             self.cache.save(cache_key_dwt, (p_long, p_short, depth_J))
 
         # Step 3: Dual-Path TFT Forecasting (With Cache)
+        print("Step 3: Dual-Path TFT Forecasting")
         cache_key_tft = "step3_tft_forecasts_metrics"
         if self.cache.exists(cache_key_tft):
             metrics, pred_long, pred_short = self.cache.load(cache_key_tft)
@@ -104,6 +107,7 @@ class DWDBOMasterFramework:
         num_units = self.bess_cfg.num_units
 
         # Step 4: Adaptive AOA Optimization (With Cache)
+        print("Step 4: Adaptive AOA Optimization")
         cache_key_aoa = f"step4_aoa_opt_horizon_{T}"
         
         if self.cache.exists(cache_key_aoa):
@@ -129,6 +133,7 @@ class DWDBOMasterFramework:
         self.results_gen.plot_fig6_aoa_convergence(conv_curve)
 
         # Step 5: Lower-Level CVaR & Sensitivity Analysis
+        print("Step 5: Lower-Level CVaR & Sensitivity Analysis")
         cache_key_cvar = f"step5_cvar_results_{T}"
         if self.cache.exists(cache_key_cvar):
             cvar_cost, exp_cost, zeta, cvar_sensitivity = self.cache.load(cache_key_cvar)

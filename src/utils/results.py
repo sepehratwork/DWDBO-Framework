@@ -102,8 +102,8 @@ class PaperResultsGenerator:
             ax = axes[i]
             sample_range = slice(155700, 155950) if len(df_raw) > 155950 else slice(100, 350)
             
-            y_raw = df_raw[col].iloc[sample_range].to_numpy()
-            y_imp = df_imputed[col].iloc[sample_range].to_numpy()
+            y_raw = df_raw[col].iloc[sample_range].to_numpy() if col in df_raw.columns else df_raw.iloc[:, 0].iloc[sample_range].to_numpy()
+            y_imp = df_imputed[col].iloc[sample_range].to_numpy() if col in df_imputed.columns else df_imputed.iloc[:, 0].iloc[sample_range].to_numpy()
             x_axis = np.arange(len(y_raw))
 
             ax.plot(x_axis, y_raw, label="Actual/Raw", color="tab:blue", lw=2)
@@ -131,8 +131,13 @@ class PaperResultsGenerator:
         axes[0, 0].set_ylabel("Loss")
         axes[0, 0].grid(True, linestyle="--", alpha=0.5)
 
-        axes[0, 1].scatter(pv_actual, pv_pred, color="navy", alpha=0.3, s=10)
-        axes[0, 1].plot([min(pv_actual), max(pv_actual)], [min(pv_actual), max(pv_actual)], "r--", label="r = 0.977")
+        # Align PV array lengths
+        n_pv = min(len(pv_actual), len(pv_pred))
+        pv_act_sub = pv_actual[:n_pv]
+        pv_pred_sub = pv_pred[:n_pv]
+
+        axes[0, 1].scatter(pv_act_sub, pv_pred_sub, color="navy", alpha=0.3, s=10)
+        axes[0, 1].plot([min(pv_act_sub), max(pv_act_sub)], [min(pv_act_sub), max(pv_act_sub)], "r--", label="r = 0.977")
         axes[0, 1].set_title("PV - Correlation (Actual vs Prediction)", fontsize=10, fontweight="bold")
         axes[0, 1].legend()
         axes[0, 1].grid(True, linestyle="--", alpha=0.5)
@@ -144,8 +149,13 @@ class PaperResultsGenerator:
         axes[1, 0].set_ylabel("Loss")
         axes[1, 0].grid(True, linestyle="--", alpha=0.5)
 
-        axes[1, 1].scatter(wind_actual, wind_pred, color="navy", alpha=0.3, s=10)
-        axes[1, 1].plot([min(wind_actual), max(wind_actual)], [min(wind_actual), max(wind_actual)], "r--", label="r = 0.987")
+        # Align Wind array lengths
+        n_wind = min(len(wind_actual), len(wind_pred))
+        wind_act_sub = wind_actual[:n_wind]
+        wind_pred_sub = wind_pred[:n_wind]
+
+        axes[1, 1].scatter(wind_act_sub, wind_pred_sub, color="navy", alpha=0.3, s=10)
+        axes[1, 1].plot([min(wind_act_sub), max(wind_act_sub)], [min(wind_act_sub), max(wind_act_sub)], "r--", label="r = 0.987")
         axes[1, 1].set_title("Wind - Correlation (Actual vs Prediction)", fontsize=10, fontweight="bold")
         axes[1, 1].legend()
         axes[1, 1].grid(True, linestyle="--", alpha=0.5)
@@ -159,19 +169,21 @@ class PaperResultsGenerator:
         """Generates Fig. 5: Comparison between actual and predicted power generation over 5000 timesteps."""
         fig, axes = plt.subplots(2, 1, figsize=(12, 8))
 
-        t = np.arange(min(5000, len(pv_act)))
-        
         # (a) PV Profile
-        axes[0].plot(t, pv_act[:len(t)], label="Actual", color="blue", alpha=0.7)
-        axes[0].plot(t, pv_pred[:len(t)], label="Predicted", color="red", linestyle="--", alpha=0.7)
+        n_pv = min(5000, len(pv_act), len(pv_pred))
+        t_pv = np.arange(n_pv)
+        axes[0].plot(t_pv, pv_act[:n_pv], label="Actual", color="blue", alpha=0.7)
+        axes[0].plot(t_pv, pv_pred[:n_pv], label="Predicted", color="red", linestyle="--", alpha=0.7)
         axes[0].set_title("(a) PV Power Generation (kW)", fontsize=10, fontweight="bold")
         axes[0].set_ylabel("Power (kW)")
         axes[0].legend()
         axes[0].grid(True, linestyle="--", alpha=0.5)
 
         # (b) Wind Profile
-        axes[1].plot(t, wind_act[:len(t)], label="Actual", color="blue", alpha=0.7)
-        axes[1].plot(t, wind_pred[:len(t)], label="Predicted", color="red", linestyle="--", alpha=0.7)
+        n_wind = min(5000, len(wind_act), len(wind_pred))
+        t_wind = np.arange(n_wind)
+        axes[1].plot(t_wind, wind_act[:n_wind], label="Actual", color="blue", alpha=0.7)
+        axes[1].plot(t_wind, wind_pred[:n_wind], label="Predicted", color="red", linestyle="--", alpha=0.7)
         axes[1].set_title("(b) Wind Power Generation (kW)", fontsize=10, fontweight="bold")
         axes[1].set_xlabel("t (15-minute timestep)")
         axes[1].set_ylabel("Power (kW)")
@@ -191,8 +203,9 @@ class PaperResultsGenerator:
         
         # Moving average
         window = 3
-        ma = np.convolve(curve, np.ones(window)/window, mode='valid')
-        ax.plot(np.arange(window-1, len(curve)), ma, label="Moving Average", color="tab:orange", linestyle="--")
+        if len(curve) >= window:
+            ma = np.convolve(curve, np.ones(window)/window, mode='valid')
+            ax.plot(np.arange(window-1, len(curve)), ma, label="Moving Average", color="tab:orange", linestyle="--")
 
         ax.set_title("Fig. 6 Convergence curve of the AOA during optimal BESS sizing and placement", fontsize=10, fontweight="bold")
         ax.set_xlabel("Iteration")

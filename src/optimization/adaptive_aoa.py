@@ -7,6 +7,7 @@ MOA and MOP schedules executing Algorithm 1 (Page 6).
 from typing import Tuple, List, Callable, Optional
 import numpy as np
 from joblib import Parallel, delayed
+from tqdm import tqdm
 
 from config import AOAConfig, BESSConfig, ParallelConfig
 
@@ -81,7 +82,7 @@ class AdaptiveAOASolver:
 
         convergence_curve = [best_fit]
 
-        for t in range(1, self.cfg.max_iterations + 1):
+        for t in tqdm(range(1, self.cfg.max_iterations + 1), desc="Adaptive AOA optimization process..."):
             # Dynamic MOA schedule (Eq. 19)
             moa = self.cfg.moa_min + t * ((self.cfg.moa_max - self.cfg.moa_min) / self.cfg.max_iterations)
             # Dynamic MOP schedule (Eq. 20)

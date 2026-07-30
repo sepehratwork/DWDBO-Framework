@@ -7,6 +7,7 @@ generator ramping constraints (Eq. 12-13), and power loss calculations over 24h 
 from typing import Dict, Tuple
 import numpy as np
 from scipy.optimize import minimize
+
 from src.power_system.ieee30_data import IEEE30BusData
 from config import BESSConfig
 
@@ -63,33 +64,33 @@ class MultiPeriodOPFSolver:
         constraints = []
 
         # 1. Power balance eq (11) at each time step t
-        def balance_rule(x, step=t):
-            P_g_t = x[step * num_gen : (step + 1) * num_gen]
-            P_ch_t = x[num_gen * T + step * num_bess : num_gen * T + (step + 1) * num_bess]
-            P_dis_t = x[(num_gen + num_bess) * T + step * num_bess : (num_gen + num_bess) * T + (step + 1) * num_bess]
-            
-            gen_sum = np.sum(P_g_t)
-            bess_net = np.sum(P_dis_t - P_ch_t)
-            loss_est = 0.02 * (demand_profile[step] / self.sys.base_demand)
-            
-            return gen_sum + p_res_long_profile[step] + bess_net - (demand_profile[step] + loss_est)
-
         for t in range(T):
+            def balance_rule(x, step=t):
+                P_g_t = x[step * num_gen : (step + 1) * num_gen]
+                P_ch_t = x[num_gen * T + step * num_bess : num_gen * T + (step + 1) * num_bess]
+                P_dis_t = x[(num_gen + num_bess) * T + step * num_bess : (num_gen + num_bess) * T + (step + 1) * num_bess]
+                
+                gen_sum = np.sum(P_g_t)
+                bess_net = np.sum(P_dis_t - P_ch_t)
+                loss_est = 0.02 * (demand_profile[step] / self.sys.base_demand)
+                
+                return gen_sum + p_res_long_profile[step] + bess_net - (demand_profile[step] + loss_est)
+
             constraints.append({'type': 'eq', 'fun': balance_rule})
 
         # 2. Generator Ramping Constraints (Eq. 13)
-        def ramp_up_rule(x, step=t, gen=g):
-            pg_curr = x[step * num_gen + gen]
-            pg_prev = x[(step - 1) * num_gen + gen]
-            return self.sys.ramp_limits[gen] - (pg_curr - pg_prev)
-
-        def ramp_down_rule(x, step=t, gen=g):
-            pg_curr = x[step * num_gen + gen]
-            pg_prev = x[(step - 1) * num_gen + gen]
-            return self.sys.ramp_limits[gen] - (pg_prev - pg_curr)
-
         for t in range(1, T):
             for g in range(num_gen):
+                def ramp_up_rule(x, step=t, gen=g):
+                    pg_curr = x[step * num_gen + gen]
+                    pg_prev = x[(step - 1) * num_gen + gen]
+                    return self.sys.ramp_limits[gen] - (pg_curr - pg_prev)
+
+                def ramp_down_rule(x, step=t, gen=g):
+                    pg_curr = x[step * num_gen + gen]
+                    pg_prev = x[(step - 1) * num_gen + gen]
+                    return self.sys.ramp_limits[gen] - (pg_prev - pg_curr)
+
                 constraints.append({'type': 'ineq', 'fun': ramp_up_rule})
                 constraints.append({'type': 'ineq', 'fun': ramp_down_rule})
 
