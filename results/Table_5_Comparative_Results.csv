@@ -1,0 +1,6 @@
+Metric,Without BESS,With BESS,Improvement (%)
+C_op ($),5667.658,5640.171,0.484
+C_inv ($),-,1.141,-
+V_dev,9.056,9.063,0.079
+L_loss (MW),48.29,48.283,0.0151
+Curtailment (%),2.654,2.576,2.966
