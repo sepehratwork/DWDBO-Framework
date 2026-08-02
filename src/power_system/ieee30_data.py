@@ -5,6 +5,7 @@ and susceptance matrix for power flow, losses, and voltage calculations.
 """
 
 import numpy as np
+from typing import Tuple
 
 
 class IEEE30BusData:
