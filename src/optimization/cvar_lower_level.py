@@ -7,7 +7,6 @@ as defined in Equations (16)-(18) with parallel sensitivity evaluations.
 from typing import Tuple, List, Dict, Optional
 import numpy as np
 from scipy.optimize import minimize
-from joblib import Parallel, delayed
 
 from config import CVaRConfig, ParallelConfig
 
@@ -21,7 +20,6 @@ class CVaRRealTimeOptimizer:
     def __init__(self, config: CVaRConfig, parallel_config: Optional[ParallelConfig] = None):
         self.cfg = config
         self.parallel_cfg = parallel_config or ParallelConfig()
-        self.n_workers = self.parallel_cfg.get_effective_workers()
 
     def sample_forecast_error_scenarios(self, base_p_short: float) -> np.ndarray:
         """Generates Gaussian stochastic forecast error scenarios (Eq. 18)."""
@@ -45,7 +43,8 @@ class CVaRRealTimeOptimizer:
         pi_s = 1.0 / N_s
         alpha = alpha_override if alpha_override is not None else self.cfg.confidence_level_alpha
 
-        scenario_costs = base_operating_cost + error_scenarios * 12.5
+        # Real-time imbalance scenario cost
+        scenario_costs = base_operating_cost + np.abs(error_scenarios) * 12.5
 
         def cvar_obj(x):
             zeta = x[0]
@@ -58,7 +57,7 @@ class CVaRRealTimeOptimizer:
 
         bounds = [(None, None)] + [(0.0, None)] * N_s
         x0 = np.zeros(1 + N_s)
-        x0[0] = np.percentile(scenario_costs, alpha * 100)
+        x0[0] = float(np.percentile(scenario_costs, alpha * 100))
 
         res = minimize(cvar_obj, x0, method='SLSQP', bounds=bounds, constraints=constraints)
 
@@ -70,27 +69,20 @@ class CVaRRealTimeOptimizer:
 
     def run_alpha_sensitivity_analysis(self, base_operating_cost: float, error_scenarios: np.ndarray) -> List[Dict[str, float]]:
         """
-        Parallelized computation of CVaR impact across multiple alpha confidence levels (Table 6).
+        Computes CVaR impact across multiple alpha confidence levels (Table 6).
 
         :param base_operating_cost: Base operational cost.
         :param error_scenarios: Forecast error distribution scenarios.
         :return: List of metric dicts matching Table 6.
         """
         alphas = self.cfg.alpha_sensitivity_levels
-
-        def compute_single_alpha(alpha_val):
-            cvar, exp_cost, _ = self.optimize_cvar_risk(base_operating_cost, error_scenarios, alpha_override=alpha_val)
-            return {
-                "Confidence Level alpha": alpha_val,
+        results = []
+        for a in alphas:
+            cvar, exp_cost, zeta = self.optimize_cvar_risk(base_operating_cost, error_scenarios, alpha_override=a)
+            results.append({
+                "Confidence Level alpha": a,
                 "Expected Cost ($)": round(exp_cost, 2),
-                "CVaR Cost ($)": round(cvar, 2)
-            }
-
-        if self.n_workers > 1:
-            results = Parallel(n_jobs=self.n_workers)(
-                delayed(compute_single_alpha)(a) for a in alphas
-            )
-        else:
-            results = [compute_single_alpha(a) for a in alphas]
-
+                "CVaR Cost ($)": round(cvar, 2),
+                "VaR Threshold ($)": round(zeta, 2)
+            })
         return results

@@ -12,14 +12,14 @@ from typing import Tuple, List
 @dataclass
 class ParallelConfig:
     """Parallelization configuration for multi-core acceleration."""
-    # Setting num_workers to -1 automatically utilizes all available CPU cores
     num_workers: int = -1
     use_multiprocessing: bool = True
 
     def get_effective_workers(self) -> int:
         """Resolves negative worker counts to physical CPU core limits."""
         if self.num_workers <= 0:
-            return max(1, os.cpu_count() - 2)
+            cpu_cnt = os.cpu_count() or 4
+            return max(1, cpu_cnt - 2 if cpu_cnt > 2 else 1)
         return self.num_workers
 
 
@@ -57,8 +57,8 @@ class TFTConfig:
     training_epochs: int = 150
     batch_size: int = 128
     learning_rate: float = 0.001
-    lookback_window: int = 192  # 48 hours lookback (48 * 4 steps at 15-min res)
-    forecast_horizon: int = 4   # 1 hour forecast (4 steps at 15-min res)
+    lookback_window: int = 48  # 48 lookback time steps (Section 3)
+    forecast_horizon: int = 1  # 1-step forecast horizon
 
 
 @dataclass
@@ -69,12 +69,13 @@ class BESSConfig:
     capacity_max_mwh: float = 50.0  # [0.0 - 50.0 MWh]
     power_min_mw: float = 0.0
     power_max_mw: float = 15.0      # [0.0 - 15.0 MW]
-    eta_charge: float = 0.90        # Charging efficiency eta_ch = 0.90
-    eta_discharge: float = 0.95     # Discharging efficiency eta_dis = 0.95
-    soc_min: float = 0.10           # Minimum SOC (10%)
-    soc_max: float = 0.90           # Maximum SOC (90%)
+    eta_charge: float = 0.90        # Charging efficiency eta_ch = 0.90 (Section 2.4)
+    eta_discharge: float = 0.95     # Discharging efficiency eta_dis = 0.95 (Section 2.4)
+    soc_min: float = 0.10           # Minimum SOC (10%) (Eq. 15)
+    soc_max: float = 0.90           # Maximum SOC (90%) (Eq. 15)
     soc_initial: float = 0.50       # Initial state of charge (50%)
-    degradation_cost: float = 1.141 # BESS wear cost C_BESS ($/MWh)
+    degradation_cost: float = 1.141 # BESS wear cost C_BESS ($/MWh) (Table 5)
+    capital_cost_per_mwh: float = 15.0 # Investment cost coefficient ($/MWh)
 
 
 @dataclass
@@ -84,7 +85,7 @@ class AOAConfig:
     max_iterations: int = 40
     moa_min: float = 0.2
     moa_max: float = 0.9
-    alpha: float = 5.0  # Regulates decay profile of MOP(t)
+    alpha: float = 5.0  # Regulates decay profile of MOP(t) (Eq. 20)
     weights: Tuple[float, float, float, float] = (0.50, 0.20, 0.15, 0.15)
 
 

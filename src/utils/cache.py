@@ -16,11 +16,6 @@ class CacheManager:
     """
 
     def __init__(self, config: Optional[CacheConfig] = None):
-        """
-        Initialize CacheManager.
-
-        :param config: CacheConfig instance specifying directory and enabled state.
-        """
         self.cfg = config or CacheConfig()
         if self.cfg.enable_cache:
             os.makedirs(self.cfg.cache_dir, exist_ok=True)

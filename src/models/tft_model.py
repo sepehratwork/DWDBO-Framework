@@ -41,6 +41,7 @@ class GatedResidualNetwork(nn.Module):
         out = self.fc2(out)
         out = self.dropout(out)
         out = self.glu(out)
+        # Element-wise feature selection / gating (Eq. 7)
         return self.layer_norm(residual + out)
 
 

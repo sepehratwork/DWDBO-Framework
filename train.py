@@ -1,12 +1,11 @@
 """
 Main Execution Script.
 Simulates Open Power System Data (OPSD), initializes the DWDBO pipeline,
-executes parallel multi-core optimization, saves checkpoints, and outputs all
+executes multi-core optimization, saves checkpoints, and outputs all
 figures and tables matching the paper.
 """
 
 import time
-import torch
 import numpy as np
 import pandas as pd
 
@@ -43,7 +42,7 @@ def main():
     print("==========================================================================================\n")
 
     # Global Parallel & System Settings
-    parallel_cfg = ParallelConfig(num_workers=-1)  # Read all physical CPU cores
+    parallel_cfg = ParallelConfig(num_workers=-1)
     cache_cfg = CacheConfig(enable_cache=True, cache_dir="cache")
     output_cfg = OutputConfig(results_dir="results", export_figures=True, export_tables=True)
 

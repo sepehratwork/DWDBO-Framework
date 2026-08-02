@@ -2,13 +2,12 @@
 Multi-Period Optimal Power Flow (OPF) Engine.
 Solves network economic dispatch with BESS SOC dynamics (Eq. 14-15),
 generator ramping constraints (Eq. 12-13), and power loss calculations over 24h / 48h horizons.
-Parallelized and vectorized for high-performance execution.
+Vectorized and structured for complete physical accuracy.
 """
 
-from typing import Dict, Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict, Any
 import numpy as np
 from scipy.optimize import minimize
-from joblib import Parallel, delayed
 
 from src.power_system.ieee30_data import IEEE30BusData
 from config import BESSConfig, ParallelConfig
@@ -19,17 +18,9 @@ class MultiPeriodOPFSolver:
 
     def __init__(self, sys_data: IEEE30BusData, bess_cfg: BESSConfig,
                  parallel_config: Optional[ParallelConfig] = None):
-        """
-        Initialize MultiPeriodOPFSolver.
-
-        :param sys_data: IEEE 30-bus grid topology and generator data.
-        :param bess_cfg: BESS operational and physical constraints configuration.
-        :param parallel_config: Configuration settings controlling parallel worker execution.
-        """
         self.sys = sys_data
         self.bess_cfg = bess_cfg
         self.parallel_cfg = parallel_config or ParallelConfig()
-        self.n_workers = self.parallel_cfg.get_effective_workers()
 
     def solve_multi_period_dispatch(
         self,
@@ -38,140 +29,190 @@ class MultiPeriodOPFSolver:
         p_res_long_profile: np.ndarray,
         bess_placements: np.ndarray,
         bess_capacities: np.ndarray
-    ) -> Tuple[float, float, float, float]:
+    ) -> Tuple[float, float, float, float, float, np.ndarray]:
         """
         Solves multi-period OPF minimization problem (Eq. 10 - Eq. 15).
 
         :param horizon_hours: Scheduling time horizon T (24 or 48 hours).
         :param demand_profile: Hourly load demand vector P_D(t).
         :param p_res_long_profile: Hourly long-term renewable forecast P_long(t).
-        :param bess_placements: Bus indices for installed BESS units.
+        :param bess_placements: Bus indices for installed BESS units (1-indexed).
         :param bess_capacities: Storage capacities E_cap (MWh) for installed BESS units.
-        :return: Tuple of (total_op_cost, total_bess_wear_cost, total_voltage_dev, total_loss_cost).
+        :return: Tuple of (C_op, C_inv, V_dev, L_loss, curtailment_pct, commitment_matrix).
         """
         T = horizon_hours
         num_gen = self.sys.num_generators
         num_bess = len(bess_placements)
 
-        # Decision variables vector x: [P_g(t) (G*T), P_ch(t) (B*T), P_dis(t) (B*T)]
-        num_vars = num_gen * T + 2 * num_bess * T
+        # Truncate or expand profiles to scheduling horizon T
+        P_D = demand_profile[:T] if len(demand_profile) >= T else np.pad(demand_profile, (0, T - len(demand_profile)), mode='edge')
+        P_RES = p_res_long_profile[:T] if len(p_res_long_profile) >= T else np.pad(p_res_long_profile, (0, T - len(p_res_long_profile)), mode='edge')
+
+        # Decision variables per timestep t:
+        # P_G: num_gen * T
+        # P_ch: num_bess * T
+        # P_dis: num_bess * T
+        # SOC: num_bess * T
+        # P_curtail: T
+        idx_pg = 0
+        idx_pch = idx_pg + num_gen * T
+        idx_pdis = idx_pch + num_bess * T
+        idx_soc = idx_pdis + num_bess * T
+        idx_curtail = idx_soc + num_bess * T
+        num_vars = idx_curtail + T
 
         def objective(x: np.ndarray) -> float:
             """Vectorized multi-period objective function computation (Eq. 10)."""
-            P_g = x[: num_gen * T].reshape((T, num_gen))
-            P_ch = x[num_gen * T : (num_gen + num_bess) * T].reshape((T, num_bess))
-            P_dis = x[(num_gen + num_bess) * T :].reshape((T, num_bess))
+            P_g = x[idx_pg : idx_pch].reshape((T, num_gen))
+            P_ch = x[idx_pch : idx_pdis].reshape((T, num_bess))
+            P_dis = x[idx_pdis : idx_soc].reshape((T, num_bess))
 
-            # Thermal operating cost (Eq. 10) - Vectorized across all time steps and generators
+            # Thermal operating cost (Eq. 10)
             cost_gen = np.sum(
                 self.sys.cost_a * (P_g ** 2) + self.sys.cost_b * P_g + self.sys.cost_c
             )
 
-            # BESS cycling wear cost (Eq. 10) - Vectorized across all time steps and BESS units
+            # BESS cycling wear cost (Eq. 10)
             cost_bess = np.sum(self.bess_cfg.degradation_cost * (P_ch + P_dis))
             return float(cost_gen + cost_bess)
 
-        # ---------------------------------------------------------------------
-        # Parallelized Constraint Construction
-        # ---------------------------------------------------------------------
-        def _create_balance_rule(step: int):
-            """Creates power balance equality constraint (Eq. 11) for timestep step."""
-            def balance_rule(x: np.ndarray) -> float:
-                P_g_t = x[step * num_gen : (step + 1) * num_gen]
-                P_ch_t = x[num_gen * T + step * num_bess : num_gen * T + (step + 1) * num_bess]
-                P_dis_t = x[(num_gen + num_bess) * T + step * num_bess : (num_gen + num_bess) * T + (step + 1) * num_bess]
-                
-                gen_sum = np.sum(P_g_t)
-                bess_net = np.sum(P_dis_t - P_ch_t)
-                loss_est = 0.02 * (demand_profile[step] / self.sys.base_demand)
-                
-                return float(gen_sum + p_res_long_profile[step] + bess_net - (demand_profile[step] + loss_est))
+        constraints = []
 
-            return {'type': 'eq', 'fun': balance_rule}
+        # 1. Power Balance Constraints (Eq. 11) for each timestep t
+        for t in range(T):
+            def make_balance_rule(time_step):
+                def balance_rule(x: np.ndarray) -> float:
+                    pg_t = x[idx_pg + time_step * num_gen : idx_pg + (time_step + 1) * num_gen]
+                    pch_t = x[idx_pch + time_step * num_bess : idx_pch + (time_step + 1) * num_bess]
+                    pdis_t = x[idx_pdis + time_step * num_bess : idx_pdis + (time_step + 1) * num_bess]
+                    p_curt_t = x[idx_curtail + time_step]
+                    
+                    gen_total = np.sum(pg_t)
+                    bess_net = np.sum(pdis_t - pch_t)
+                    res_net = P_RES[time_step] - p_curt_t
+                    loss_est = 0.02 * (P_D[time_step] / self.sys.base_demand) * 10.0
+                    
+                    return float(gen_total + res_net + bess_net - (P_D[time_step] + loss_est))
+                return balance_rule
 
-        def _create_ramp_rules(step: int, gen: int) -> List[Dict]:
-            """Creates generator ramping up/down inequality constraints (Eq. 13)."""
-            def ramp_up_rule(x: np.ndarray) -> float:
-                pg_curr = x[step * num_gen + gen]
-                pg_prev = x[(step - 1) * num_gen + gen]
-                return float(self.sys.ramp_limits[gen] - (pg_curr - pg_prev))
+            constraints.append({'type': 'eq', 'fun': make_balance_rule(t)})
 
-            def ramp_down_rule(x: np.ndarray) -> float:
-                pg_curr = x[step * num_gen + gen]
-                pg_prev = x[(step - 1) * num_gen + gen]
-                return float(self.sys.ramp_limits[gen] - (pg_prev - pg_curr))
+        # 2. BESS State of Charge Dynamics (Eq. 14)
+        dt = 1.0  # 1 hour step
+        for b in range(num_bess):
+            cap_b = max(1.0, bess_capacities[b])
+            for t in range(T):
+                def make_soc_rule(unit_b, time_step, E_cap):
+                    def soc_rule(x: np.ndarray) -> float:
+                        pch = x[idx_pch + time_step * num_bess + unit_b]
+                        pdis = x[idx_pdis + time_step * num_bess + unit_b]
+                        soc_curr = x[idx_soc + time_step * num_bess + unit_b]
+                        
+                        if time_step == 0:
+                            soc_prev = self.bess_cfg.soc_initial
+                        else:
+                            soc_prev = x[idx_soc + (time_step - 1) * num_bess + unit_b]
 
-            return [{'type': 'ineq', 'fun': ramp_up_rule}, {'type': 'ineq', 'fun': ramp_down_rule}]
+                        delta_soc = ((self.bess_cfg.eta_charge * pch) - (pdis / self.bess_cfg.eta_discharge)) * dt / E_cap
+                        return float(soc_curr - (soc_prev + delta_soc))
+                    return soc_rule
 
-        # Construct power balance constraints (Eq. 11) in parallel
-        if self.n_workers > 1:
-            balance_constraints = Parallel(n_jobs=self.n_workers)(
-                delayed(_create_balance_rule)(t) for t in range(T)
-            )
-            ramp_constraint_pairs = Parallel(n_jobs=self.n_workers)(
-                delayed(_create_ramp_rules)(t, g) for t in range(1, T) for g in range(num_gen)
-            )
-            ramp_constraints = [item for pair in ramp_constraint_pairs for item in pair]
-        else:
-            balance_constraints = [_create_balance_rule(t) for t in range(T)]
-            ramp_constraints = []
-            for t in range(1, T):
-                for g in range(num_gen):
-                    ramp_constraints.extend(_create_ramp_rules(t, g))
+                constraints.append({'type': 'eq', 'fun': make_soc_rule(b, t, cap_b)})
 
-        constraints = balance_constraints + ramp_constraints
+        # 3. Generator Ramping Limits (Eq. 13)
+        for t in range(1, T):
+            for g in range(num_gen):
+                def make_ramp_up_rule(time_step, gen_unit):
+                    def ramp_up(x: np.ndarray) -> float:
+                        pg_curr = x[idx_pg + time_step * num_gen + gen_unit]
+                        pg_prev = x[idx_pg + (time_step - 1) * num_gen + gen_unit]
+                        return float(self.sys.ramp_limits[gen_unit] - (pg_curr - pg_prev))
+                    return ramp_up
 
-        # ---------------------------------------------------------------------
-        # Vectorized Bounds & Initial Decision Vector Setup
-        # ---------------------------------------------------------------------
-        # Generator bounds (Eq. 12) vectorized across all time steps
-        gen_bounds = list(zip(np.tile(self.sys.p_min, T), np.tile(self.sys.p_max, T)))
-        bess_ch_bounds = [(0.0, self.bess_cfg.power_max_mw)] * (num_bess * T)
-        bess_dis_bounds = [(0.0, self.bess_cfg.power_max_mw)] * (num_bess * T)
-        bounds = gen_bounds + bess_ch_bounds + bess_dis_bounds
+                def make_ramp_down_rule(time_step, gen_unit):
+                    def ramp_down(x: np.ndarray) -> float:
+                        pg_curr = x[idx_pg + time_step * num_gen + gen_unit]
+                        pg_prev = x[idx_pg + (time_step - 1) * num_gen + gen_unit]
+                        return float(self.sys.ramp_limits[gen_unit] - (pg_prev - pg_curr))
+                    return ramp_down
 
-        # Vectorized initial guess initialization
+                constraints.append({'type': 'ineq', 'fun': make_ramp_up_rule(t, g)})
+                constraints.append({'type': 'ineq', 'fun': make_ramp_down_rule(t, g)})
+
+        # Decision Variable Bounds
+        bounds = []
+
+        # P_G bounds (Eq. 12)
+        for t in range(T):
+            for g in range(num_gen):
+                bounds.append((self.sys.p_min[g], self.sys.p_max[g]))
+
+        # P_ch & P_dis bounds
+        for t in range(T):
+            for b in range(num_bess):
+                bounds.append((self.bess_cfg.power_min_mw, self.bess_cfg.power_max_mw))
+        for t in range(T):
+            for b in range(num_bess):
+                bounds.append((self.bess_cfg.power_min_mw, self.bess_cfg.power_max_mw))
+
+        # SOC bounds (Eq. 15)
+        for t in range(T):
+            for b in range(num_bess):
+                bounds.append((self.bess_cfg.soc_min, self.bess_cfg.soc_max))
+
+        # Curtailment bounds
+        for t in range(T):
+            bounds.append((0.0, max(0.0, P_RES[t])))
+
+        # Initial Vector Setup
         x0 = np.zeros(num_vars)
-        gen_midpoints = (self.sys.p_min + self.sys.p_max) / 2.0
-        x0[: num_gen * T] = np.tile(gen_midpoints, T)
+        for t in range(T):
+            x0[idx_pg + t * num_gen : idx_pg + (t + 1) * num_gen] = (self.sys.p_min + self.sys.p_max) / 2.0
+            x0[idx_soc + t * num_bess : idx_soc + (t + 1) * num_bess] = self.bess_cfg.soc_initial
 
-        # Execute SLSQP Non-Linear Programming Optimization
+        # Execute SLSQP Non-Linear Optimization
         res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=constraints)
 
-        opt_cost = float(res.fun) if res.success else float(objective(x0))
-        voltage_dev = 0.008 * T
-        line_losses = 0.015 * T
+        x_opt = res.x if res.success else x0
+        c_op = float(objective(x_opt))
 
-        return opt_cost, opt_cost * 0.05, voltage_dev, line_losses
+        # Calculate BESS Capital Investment Cost C_inv
+        c_inv = float(np.sum(bess_capacities) * self.bess_cfg.capital_cost_per_mwh) if num_bess > 0 else 0.0
 
-    def solve_batch_dispatches(
-        self,
-        horizon_hours: int,
-        demand_profiles: List[np.ndarray],
-        p_res_profiles: List[np.ndarray],
-        bess_placements: np.ndarray,
-        bess_capacities: np.ndarray
-    ) -> List[Tuple[float, float, float, float]]:
-        """
-        Parallelized evaluation of multiple multi-period OPF dispatches across batch scenarios.
+        # Calculate Network Flow, Loss, and Voltage Deviations
+        P_g_opt = x_opt[idx_pg : idx_pch].reshape((T, num_gen))
+        P_curt_opt = x_opt[idx_curtail :]
 
-        :param horizon_hours: Scheduling time horizon T (24 or 48 hours).
-        :param demand_profiles: List of demand vectors for each scenario.
-        :param p_res_profiles: List of renewable vectors for each scenario.
-        :param bess_placements: Bus indices for installed BESS units.
-        :param bess_capacities: Storage capacities E_cap (MWh) for installed BESS units.
-        :return: List of solved dispatch metric tuples.
-        """
-        n_scenarios = len(demand_profiles)
-        
-        def _solve_single(idx: int):
-            return self.solve_multi_period_dispatch(
-                horizon_hours, demand_profiles[idx], p_res_profiles[idx], bess_placements, bess_capacities
-            )
+        v_dev_total = 0.0
+        l_loss_total = 0.0
 
-        if self.n_workers > 1:
-            return Parallel(n_jobs=self.n_workers)(
-                delayed(_solve_single)(i) for i in range(n_scenarios)
-            )
-        else:
-            return [_solve_single(i) for i in range(n_scenarios)]
+        for t in range(T):
+            P_inj = np.zeros(self.sys.num_buses)
+            # Generator injections
+            for g in range(num_gen):
+                bus_idx = self.sys.gen_bus_indices[g]
+                P_inj[bus_idx] += P_g_opt[t, g]
+            # Renewable injection at bus 12 (1-indexed 13)
+            P_inj[12] += (P_RES[t] - P_curt_opt[t])
+            # BESS injections
+            for b in range(num_bess):
+                b_bus = int(bess_placements[b]) - 1
+                if 0 <= b_bus < self.sys.num_buses:
+                    pch = x_opt[idx_pch + t * num_bess + b]
+                    pdis = x_opt[idx_pdis + t * num_bess + b]
+                    P_inj[b_bus] += (pdis - pch)
+            # Load demand distributed across buses
+            P_inj -= (P_D[t] / self.sys.num_buses)
+
+            v_d, l_l = self.sys.compute_network_flow_and_losses(P_inj)
+            v_dev_total += v_d
+            l_loss_total += l_l
+
+        v_dev_avg = float(v_dev_total / T)
+        l_loss_total = float(l_loss_total)
+        curtailment_pct = float((np.sum(P_curt_opt) / max(1e-5, np.sum(P_RES))) * 100.0)
+
+        # Commitment Status Matrix (1 if PG > Pmin * 0.1 else 0)
+        commitment_matrix = (P_g_opt > (self.sys.p_min * 0.1)).astype(int).T
+
+        return c_op, c_inv, v_dev_avg, l_loss_total, curtailment_pct, commitment_matrix

@@ -67,11 +67,10 @@ class DWDBOMasterFramework:
 
         self.results_gen.plot_fig3_knn_imputation(df_raw, df_clean)
 
-        # Signal combination (Eq. 4)
-        if "wind_power" in df_clean.columns and "solar_power" in df_clean.columns:
-            res_signal = df_clean["wind_power"].fillna(0).to_numpy() + df_clean["solar_power"].fillna(0).to_numpy()
-        else:
-            res_signal = df_clean.iloc[:, 0].to_numpy()
+        # Renewable signals setup
+        pv_signal = df_clean["solar_power"].fillna(0).to_numpy() if "solar_power" in df_clean.columns else df_clean.iloc[:, 0].to_numpy()
+        wind_signal = df_clean["wind_power"].fillna(0).to_numpy() if "wind_power" in df_clean.columns else df_clean.iloc[:, 0].to_numpy()
+        res_signal = pv_signal + wind_signal
 
         # Step 2: DWT Decomposition (With Cache)
         print("Step 2: DWT Decomposition")
@@ -82,84 +81,113 @@ class DWDBOMasterFramework:
             p_long, p_short, depth_J = self.decomposer.decompose_signal(res_signal)
             self.cache.save(cache_key_dwt, (p_long, p_short, depth_J))
 
+        # Decomposition of individual PV and Wind profiles for detailed evaluation
+        pv_long, pv_short, _ = self.decomposer.decompose_signal(pv_signal)
+        wind_long, wind_short, _ = self.decomposer.decompose_signal(wind_signal)
+
         # Step 3: Dual-Path TFT Forecasting (With Cache)
         print("Step 3: Dual-Path TFT Forecasting")
         cache_key_tft = "step3_tft_forecasts_metrics"
         if self.cache.exists(cache_key_tft):
-            metrics, pred_long, pred_short = self.cache.load(cache_key_tft)
+            metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind = self.cache.load(cache_key_tft)
         else:
-            metrics, pred_long, pred_short = self.tft_engine.train_and_forecast(p_long, p_short)
-            self.cache.save(cache_key_tft, (metrics, pred_long, pred_short))
+            # Forecast total RES profile
+            metrics, pred_long, pred_short, history_pv, eval_pv = self.tft_engine.train_and_forecast_single_source(pv_long, pv_short)
+            m_wind, p_wind_l, p_wind_s, history_wind, eval_wind = self.tft_engine.train_and_forecast_single_source(wind_long, wind_short)
+            
+            # Combine overall metrics
+            metrics["MAE"] = float((metrics["MAE"] + m_wind["MAE"]) / 2.0)
+            metrics["RMSE"] = float((metrics["RMSE"] + m_wind["RMSE"]) / 2.0)
+            metrics["R2"] = float((metrics["R2"] + m_wind["R2"]) / 2.0)
 
-        # Generate Paper Figures 4, 5 and Table 3
-        pv_act = df_clean["solar_power"].to_numpy() if "solar_power" in df_clean.columns else res_signal
-        wind_act = df_clean["wind_power"].to_numpy() if "wind_power" in df_clean.columns else res_signal
-        
+            self.cache.save(cache_key_tft, (metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind))
+
         self.results_gen.print_and_export_table3(metrics)
-        self.results_gen.plot_fig4_tft_losses_and_correlation(pv_act, pred_long, wind_act, pred_short)
-        self.results_gen.plot_fig5_actual_vs_predicted(pv_act, pred_long, wind_act, pred_short)
+        self.results_gen.plot_fig4_tft_losses_and_correlation(history_pv, history_wind, eval_pv, eval_wind)
+        self.results_gen.plot_fig5_actual_vs_predicted(eval_pv["y_actual"], eval_pv["y_pred"], eval_wind["y_actual"], eval_wind["y_pred"])
 
         # Horizon setup
         T = scheduling_horizon_hours
-        demand_h = np.full(T, self.sys_data.base_demand)
+        demand_h = df_clean["load_demand"].to_numpy()[:T] if "load_demand" in df_clean.columns else np.full(T, self.sys_data.base_demand)
         p_long_h = pred_long[:T]
         p_short_h = pred_short[:T]
         num_units = self.bess_cfg.num_units
 
-        # Step 4: Adaptive AOA Optimization (With Cache)
+        # Step 4: Adaptive AOA Siting & Sizing Optimization (With Cache)
         print("Step 4: Adaptive AOA Optimization")
         cache_key_aoa = f"step4_aoa_opt_horizon_{T}"
         
         if self.cache.exists(cache_key_aoa):
-            best_X, best_fitness, conv_curve = self.cache.load(cache_key_aoa)
+            best_X, best_fitness, conv_curve, pop_fitness_dist = self.cache.load(cache_key_aoa)
         else:
             def multi_objective_fitness(X: np.ndarray) -> float:
                 buses = X[: num_units].astype(int)
                 capacities = X[num_units :]
-                c_op, _, v_dev, l_loss = self.opf_solver.solve_multi_period_dispatch(
+                c_op, c_inv, v_dev, l_loss, curt_pct, _ = self.opf_solver.solve_multi_period_dispatch(
                     T, demand_h, p_long_h, buses, capacities
                 )
-                c_inv = float(np.sum(capacities) * 15.0)
                 w = self.aoa_cfg.weights
                 return float(w[0] * c_op + w[1] * c_inv + w[2] * v_dev * 100.0 + w[3] * l_loss * 100.0)
 
-            best_X, best_fitness, conv_curve = self.aoa_solver.optimize(multi_objective_fitness)
-            self.cache.save(cache_key_aoa, (best_X, best_fitness, conv_curve))
+            best_X, best_fitness, conv_curve, pop_fitness_dist = self.aoa_solver.optimize(multi_objective_fitness)
+            self.cache.save(cache_key_aoa, (best_X, best_fitness, conv_curve, pop_fitness_dist))
 
-        opt_buses = np.array([1, 4])  # Paper Table 4 exact buses
-        opt_capacities = np.array([10.01, 10.09])  # Paper Table 4 capacities
+        opt_buses = best_X[: num_units].astype(int)
+        opt_capacities = best_X[num_units :]
+        opt_power_ratings = np.clip(opt_capacities * 0.25, self.bess_cfg.power_min_mw, self.bess_cfg.power_max_mw)
 
-        self.results_gen.print_and_export_table4(opt_buses, opt_capacities)
+        self.results_gen.print_and_export_table4(opt_buses, opt_capacities, opt_power_ratings)
         self.results_gen.plot_fig6_aoa_convergence(conv_curve)
 
-        # Step 5: Lower-Level CVaR & Sensitivity Analysis
+        # Comparative OPF Evaluation (24h & 48h horizons With/Without BESS)
+        c_op_24, c_inv_24, v_dev_24, l_loss_24, curt_24, commit_24 = self.opf_solver.solve_multi_period_dispatch(
+            24, demand_h[:24], p_long_h[:24], opt_buses, opt_capacities
+        )
+        c_op_24_wo, _, v_dev_24_wo, l_loss_24_wo, curt_24_wo, _ = self.opf_solver.solve_multi_period_dispatch(
+            24, demand_h[:24], p_long_h[:24], np.array([]), np.array([])
+        )
+
+        m24_with = {"C_op": c_op_24, "C_inv": c_inv_24, "V_dev": v_dev_24, "L_loss": l_loss_24, "Curtailment": curt_24}
+        m24_wo = {"C_op": c_op_24_wo, "C_inv": 0.0, "V_dev": v_dev_24_wo, "L_loss": l_loss_24_wo, "Curtailment": curt_24_wo}
+
+        # 48h horizon comparison
+        demand_48 = df_clean["load_demand"].to_numpy()[:48] if len(df_clean) >= 48 else np.pad(df_clean["load_demand"].to_numpy(), (0, 48 - len(df_clean)), mode='edge')
+        p_long_48 = pred_long[:48] if len(pred_long) >= 48 else np.pad(pred_long, (0, 48 - len(pred_long)), mode='edge')
+
+        c_op_48, c_inv_48, v_dev_48, l_loss_48, curt_48, _ = self.opf_solver.solve_multi_period_dispatch(
+            48, demand_48, p_long_48, opt_buses, opt_capacities
+        )
+        c_op_48_wo, _, v_dev_48_wo, l_loss_48_wo, curt_48_wo, _ = self.opf_solver.solve_multi_period_dispatch(
+            48, demand_48, p_long_48, np.array([]), np.array([])
+        )
+
+        m48_with = {"C_op": c_op_48, "C_inv": c_inv_48, "V_dev": v_dev_48, "L_loss": l_loss_48, "Curtailment": curt_48}
+        m48_wo = {"C_op": c_op_48_wo, "C_inv": 0.0, "V_dev": v_dev_48_wo, "L_loss": l_loss_48_wo, "Curtailment": curt_48_wo}
+
+        self.results_gen.print_and_export_table5(m24_with, m24_wo)
+        self.results_gen.plot_fig7_performance_comparison(m24_with, m24_wo, m48_with, m48_wo)
+        self.results_gen.plot_fig8_generator_commitment(commit_24)
+
+        # Step 5: Lower-Level CVaR & Sensitivity Analysis (With Cache)
         print("Step 5: Lower-Level CVaR & Sensitivity Analysis")
         cache_key_cvar = f"step5_cvar_results_{T}"
         if self.cache.exists(cache_key_cvar):
             cvar_cost, exp_cost, zeta, cvar_sensitivity = self.cache.load(cache_key_cvar)
         else:
-            c_op_opt, _, _, _ = self.opf_solver.solve_multi_period_dispatch(
-                T, demand_h, p_long_h, opt_buses, opt_capacities
-            )
             error_scenarios = self.cvar_optimizer.sample_forecast_error_scenarios(float(np.mean(p_short_h)))
-            cvar_cost, exp_cost, zeta = self.cvar_optimizer.optimize_cvar_risk(c_op_opt, error_scenarios)
-            cvar_sensitivity = self.cvar_optimizer.run_alpha_sensitivity_analysis(c_op_opt, error_scenarios)
+            cvar_cost, exp_cost, zeta = self.cvar_optimizer.optimize_cvar_risk(c_op_24, error_scenarios)
+            cvar_sensitivity = self.cvar_optimizer.run_alpha_sensitivity_analysis(c_op_24, error_scenarios)
             self.cache.save(cache_key_cvar, (cvar_cost, exp_cost, zeta, cvar_sensitivity))
 
-        # Generate Remaining Figures & Tables (Fig 7, 8, 9, 10 and Tables 5, 6)
-        self.results_gen.print_and_export_table5({"C_op": 5640.171}, {"C_op": 5667.658})
         self.results_gen.print_and_export_table6(cvar_sensitivity)
-        
-        self.results_gen.plot_fig7_performance_comparison()
-        self.results_gen.plot_fig8_generator_commitment()
-        self.results_gen.plot_fig9_expected_vs_cvar()
-        self.results_gen.plot_fig10_objective_distribution()
+        self.results_gen.plot_fig9_expected_vs_cvar(cvar_sensitivity)
+        self.results_gen.plot_fig10_objective_distribution(pop_fitness_dist)
 
         return {
             "forecast_metrics": metrics,
             "optimal_bess_buses": opt_buses,
             "optimal_bess_capacities_mwh": opt_capacities,
-            "operating_cost": 5640.171,
+            "operating_cost": c_op_24,
             "expected_cost": exp_cost,
             "cvar_cost": cvar_cost,
             "var_threshold_zeta": zeta,

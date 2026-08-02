@@ -1,15 +1,16 @@
 """
 Dual-Path TFT Training and Evaluation Engine.
 Handles 48-hour sliding window construction, PyTorch training loops, 
-and computes MAE, RMSE, and R2 evaluation metrics (Table 3).
+loss history tracking, and computes MAE, RMSE, and R2 evaluation metrics (Table 3).
 """
 
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
 
 from config import TFTConfig
 from src.models.tft_model import DualPathTFTModel
@@ -21,13 +22,11 @@ class TFTTrainerEngine:
     def __init__(self, config: TFTConfig):
         self.cfg = config
         
-        # Hyperparameters with default fallbacks matching Table 2 of the paper
-        hidden_dim = getattr(config, "hidden_dim", getattr(config, "hidden_layer_dimensions", 32))
+        hidden_dim = getattr(config, "hidden_dim", 32)
         num_heads = getattr(config, "attention_heads", 2)
-        num_layers = getattr(config, "num_layers", getattr(config, "number_of_layers", 2))
+        num_layers = getattr(config, "num_layers", 2)
         dropout_rate = getattr(config, "dropout_rate", 0.12)
         
-        # GPU detection & hardware acceleration configuration
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
             torch.backends.cudnn.benchmark = True
@@ -45,117 +44,139 @@ class TFTTrainerEngine:
             dropout_rate=dropout_rate
         ).to(self.device)
 
-        # Optional PyTorch 2.0+ Model Compiler for CUDA
-        if hasattr(torch, "compile") and self.device.type == "cuda":
-            try:
-                self.model = torch.compile(self.model)
-            except Exception:
-                pass
-
-    def _build_sliding_windows(self, series: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _build_sliding_windows(self, series: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Vectorized construction of sliding historical lookback windows and future targets."""
-        w = getattr(self.cfg, "lookback_window", getattr(self.cfg, "sliding_window", 48))
-        series_t = torch.as_tensor(series, dtype=torch.float32)
-        
-        # Fast tensor unfold view (dimension, size, step) replacing slow Python loops
-        X = series_t.unfold(0, w, 1)[:-1].unsqueeze(-1)
-        Y = series_t[w:]
-        return X, Y
+        w = getattr(self.cfg, "lookback_window", 48)
+        N = len(series)
+        X, Y = [], []
+        for i in range(N - w):
+            X.append(series[i : i + w])
+            Y.append(series[i + w])
+        return np.array(X, dtype=np.float32)[..., np.newaxis], np.array(Y, dtype=np.float32)
 
-    def train_and_forecast(
+    def train_and_forecast_single_source(
         self, p_long: np.ndarray, p_short: np.ndarray
-    ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray]:
+    ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, Dict[str, list], Dict[str, Any]]:
         """
-        Executes dual-path training on 80% data split and tests on 20% split.
-
-        :return: Tuple of (metrics_dict, pred_long_test, pred_short_test).
+        Executes dual-path training for a single RES source (e.g. PV or Wind) on 80% split and tests on 20%.
         """
-        X_l, Y_l = self._build_sliding_windows(p_long)
-        X_s, Y_s = self._build_sliding_windows(p_short)
+        # Standardize long and short series
+        scaler_long = StandardScaler()
+        scaler_short = StandardScaler()
 
-        # 80% Train / 20% Test split as specified in paper Section 3.2
-        train_split = getattr(self.cfg, "train_split", getattr(self.cfg, "train_ratio", 0.80))
+        p_long_scaled = scaler_long.fit_transform(p_long.reshape(-1, 1)).flatten()
+        p_short_scaled = scaler_short.fit_transform(p_short.reshape(-1, 1)).flatten()
+
+        X_l, Y_l = self._build_sliding_windows(p_long_scaled)
+        X_s, Y_s = self._build_sliding_windows(p_short_scaled)
+
+        train_split = getattr(self.cfg, "train_split", 0.80)
         split_idx = int(len(X_l) * train_split)
 
-        # Store training dataset directly on GPU memory to eliminate per-batch CPU-to-GPU transfer overhead
-        train_ds = TensorDataset(
-            X_l[:split_idx].to(self.device, non_blocking=True),
-            X_s[:split_idx].to(self.device, non_blocking=True),
-            Y_l[:split_idx].to(self.device, non_blocking=True),
-            Y_s[:split_idx].to(self.device, non_blocking=True)
-        )
+        X_l_train, Y_l_train = torch.tensor(X_l[:split_idx]), torch.tensor(Y_l[:split_idx])
+        X_s_train, Y_s_train = torch.tensor(X_s[:split_idx]), torch.tensor(Y_s[:split_idx])
+
+        train_ds = TensorDataset(X_l_train, X_s_train, Y_l_train, Y_s_train)
         batch_size = getattr(self.cfg, "batch_size", 128)
-        train_loader = DataLoader(
-            train_ds, 
-            batch_size=batch_size, 
-            shuffle=True, 
-            drop_last=False
-        )
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
         learning_rate = getattr(self.cfg, "learning_rate", 0.001)
-        epochs = getattr(self.cfg, "training_epochs", getattr(self.cfg, "epochs", 150))
+        epochs = getattr(self.cfg, "training_epochs", 150)
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         criterion = nn.MSELoss()
 
-        # Mixed Precision AMP setup for accelerated GPU execution
-        use_amp = (self.device.type == "cuda")
-        scaler = torch.amp.GradScaler("cuda") if use_amp else None
+        history = {"epoch": [], "loss_total": [], "loss_long": [], "loss_short": []}
 
-        # Training Loop
         self.model.train()
         print(f"[TFTTrainerEngine] Training for {epochs} epochs on {self.device}...")
 
-        for epoch in range(epochs):
+        for epoch in range(1, epochs + 1):
             running_loss = 0.0
+            running_l_loss = 0.0
+            running_s_loss = 0.0
+
             for xl, xs, yl, ys in train_loader:
-                optimizer.zero_grad(set_to_none=True)
+                xl, xs = xl.to(self.device), xs.to(self.device)
+                yl, ys = yl.to(self.device), ys.to(self.device)
+
+                optimizer.zero_grad()
+                pred_l, pred_s = self.model(xl, xs)
                 
-                if use_amp:
-                    with torch.amp.autocast("cuda"):
-                        pred_l, pred_s = self.model(xl, xs)
-                        pred_l_flat = pred_l.squeeze(-1) if pred_l.dim() > 1 else pred_l
-                        pred_s_flat = pred_s.squeeze(-1) if pred_s.dim() > 1 else pred_s
-                        loss = criterion(pred_l_flat, yl) + criterion(pred_s_flat, ys)
-                    
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    pred_l, pred_s = self.model(xl, xs)
-                    pred_l_flat = pred_l.squeeze(-1) if pred_l.dim() > 1 else pred_l
-                    pred_s_flat = pred_s.squeeze(-1) if pred_s.dim() > 1 else pred_s
-                    loss = criterion(pred_l_flat, yl) + criterion(pred_s_flat, ys)
-                    loss.backward()
-                    optimizer.step()
+                loss_l = criterion(pred_l, yl)
+                loss_s = criterion(pred_s, ys)
+                loss = loss_l + loss_s
+
+                loss.backward()
+                optimizer.step()
 
                 running_loss += loss.item()
+                running_l_loss += loss_l.item()
+                running_s_loss += loss_s.item()
 
-            # Periodic logging eliminates stdio buffering overheads
-            avg_loss = running_loss / len(train_loader)
-            print(f"Epoch: {epoch+1:3d}/{epochs} | Loss: {avg_loss:.6f}")
+            n_batches = len(train_loader)
+            avg_tot = running_loss / n_batches
+            avg_l = running_l_loss / n_batches
+            avg_s = running_s_loss / n_batches
 
-        # Testing & Evaluation
+            history["epoch"].append(epoch)
+            history["loss_total"].append(avg_tot)
+            history["loss_long"].append(avg_l)
+            history["loss_short"].append(avg_s)
+
+            if epoch % 30 == 0 or epoch == epochs:
+                print(f"Epoch {epoch:3d}/{epochs} | Total Loss: {avg_tot:.6f} | Long Loss: {avg_l:.6f} | Short Loss: {avg_s:.6f}")
+
+        # Evaluation on Test Split
         self.model.eval()
         with torch.no_grad():
-            test_xl = X_l[split_idx:].to(self.device, non_blocking=True)
-            test_xs = X_s[split_idx:].to(self.device, non_blocking=True)
-            
-            if use_amp:
-                with torch.amp.autocast("cuda"):
-                    pred_l, pred_s = self.model(test_xl, test_xs)
-            else:
-                pred_l, pred_s = self.model(test_xl, test_xs)
+            X_l_test = torch.tensor(X_l[split_idx:]).to(self.device)
+            X_s_test = torch.tensor(X_s[split_idx:]).to(self.device)
+            pred_l_test_scaled, pred_s_test_scaled = self.model(X_l_test, X_s_test)
 
-            pred_l_np = pred_l.detach().cpu().numpy().reshape(-1)
-            pred_s_np = pred_s.detach().cpu().numpy().reshape(-1)
+            pred_l_test_scaled = pred_l_test_scaled.cpu().numpy().reshape(-1, 1)
+            pred_s_test_scaled = pred_s_test_scaled.cpu().numpy().reshape(-1, 1)
 
-        y_actual = (Y_l[split_idx:] + Y_s[split_idx:]).cpu().numpy()
-        y_pred = pred_l_np + pred_s_np
+        # Inverse transform
+        pred_long_unscaled = scaler_long.inverse_transform(pred_l_test_scaled).flatten()
+        pred_short_unscaled = scaler_short.inverse_transform(pred_s_test_scaled).flatten()
 
-        mae = float(mean_absolute_error(y_actual, y_pred))
-        rmse = float(np.sqrt(mean_squared_error(y_actual, y_pred)))
-        r2 = float(r2_score(y_actual, y_pred))
+        y_l_actual = scaler_long.inverse_transform(Y_l[split_idx:].reshape(-1, 1)).flatten()
+        y_s_actual = scaler_short.inverse_transform(Y_s[split_idx:].reshape(-1, 1)).flatten()
+
+        y_actual_total = y_l_actual + y_s_actual
+        y_pred_total = pred_long_unscaled + pred_short_unscaled
+
+        mae = float(mean_absolute_error(y_actual_total, y_pred_total))
+        rmse = float(np.sqrt(mean_squared_error(y_actual_total, y_pred_total)))
+        r2 = float(r2_score(y_actual_total, y_pred_total))
+
+        # Fit correlation line parameters
+        slope, intercept = np.polyfit(y_actual_total, y_pred_total, 1)
+        r_val = float(np.corrcoef(y_actual_total, y_pred_total)[0, 1])
 
         metrics = {"MAE": mae, "RMSE": rmse, "R2": r2}
-        return metrics, pred_l_np, pred_s_np
+        eval_details = {
+            "y_actual": y_actual_total,
+            "y_pred": y_pred_total,
+            "slope": float(slope),
+            "intercept": float(intercept),
+            "r_value": r_val
+        }
+
+        # Full predictions vector (combining unscaled train and test predictions)
+        full_pred_l = np.zeros(len(p_long))
+        full_pred_s = np.zeros(len(p_short))
+
+        w = getattr(self.cfg, "lookback_window", 48)
+        full_pred_l[w : w + len(pred_long_unscaled)] = pred_long_unscaled
+        full_pred_s[w : w + len(pred_short_unscaled)] = pred_short_unscaled
+
+        return metrics, pred_long_unscaled, pred_short_unscaled, history, eval_details
+
+    def train_and_forecast(
+        self, p_long: np.ndarray, p_short: np.ndarray
+    ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray]:
+        """Wrapper method for pipeline compatibility."""
+        metrics, pred_l, pred_s, _, _ = self.train_and_forecast_single_source(p_long, p_short)
+        return metrics, pred_l, pred_s
