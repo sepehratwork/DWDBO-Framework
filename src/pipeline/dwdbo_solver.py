@@ -1,12 +1,13 @@
 """
 Integrated DWDBO Master Pipeline Coordinator.
 Executes Algorithm 1 bi-level iteration logic, manages checkpoint persistence,
-and triggers paper table and figure generators.
+and displays progress bars for every stage of the pipeline.
 """
 
 from typing import Dict, Any, Optional
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from config import (
     DatasetConfig, TFTConfig, BESSConfig, AOAConfig, CVaRConfig, 
@@ -46,77 +47,75 @@ class DWDBOMasterFramework:
         self.decomposer = DiscreteWaveletDecomposer()
         self.tft_engine = TFTTrainerEngine(self.tft_cfg)
         self.sys_data = IEEE30BusData()
-        self.opf_solver = MultiPeriodOPFSolver(self.sys_data, self.bess_cfg)
+        self.opf_solver = MultiPeriodOPFSolver(self.sys_data, self.bess_cfg, parallel_config=self.parallel_cfg)
         self.aoa_solver = AdaptiveAOASolver(self.aoa_cfg, self.bess_cfg, parallel_config=self.parallel_cfg)
         self.cvar_optimizer = CVaRRealTimeOptimizer(self.cvar_cfg, parallel_config=self.parallel_cfg)
 
     def execute_framework(self, df_raw: pd.DataFrame, scheduling_horizon_hours: int = 24) -> Dict[str, Any]:
         """
-        Executes complete paper pipeline with caching and visualization generation.
+        Executes complete paper pipeline with progress bars and caching.
         """
-        print(f"\n--- Executing DWDBO Pipeline ({scheduling_horizon_hours}-Hour Horizon) ---")
+        print(f"\n==========================================================================")
+        print(f" EXECUTING DWDBO PIPELINE ({scheduling_horizon_hours}-HOUR SCHEDULING HORIZON)")
+        print(f"==========================================================================\n")
 
-        # Step 1: Missing Data Imputation (With Cache)
-        print("Step 1: Missing Data Imputation")
-        cache_key_imp = "step1_imputed_dataframe"
-        if self.cache.exists(cache_key_imp):
-            df_clean = self.cache.load(cache_key_imp)
-        else:
-            df_clean = self.imputer.impute_missing_data(df_raw)
-            self.cache.save(cache_key_imp, df_clean)
+        # Step 1: Missing Data Imputation Progress Bar
+        with tqdm(total=100, desc="[Step 1/5] KNN Multivariate Data Imputation", unit="%") as pbar1:
+            cache_key_imp = "step1_imputed_dataframe"
+            if self.cache.exists(cache_key_imp):
+                df_clean = self.cache.load(cache_key_imp)
+            else:
+                df_clean = self.imputer.impute_missing_data(df_raw)
+                self.cache.save(cache_key_imp, df_clean)
+            pbar1.update(100)
 
         self.results_gen.plot_fig3_knn_imputation(df_raw, df_clean)
 
-        # Renewable signals setup
         pv_signal = df_clean["solar_power"].fillna(0).to_numpy() if "solar_power" in df_clean.columns else df_clean.iloc[:, 0].to_numpy()
         wind_signal = df_clean["wind_power"].fillna(0).to_numpy() if "wind_power" in df_clean.columns else df_clean.iloc[:, 0].to_numpy()
         res_signal = pv_signal + wind_signal
 
-        # Step 2: DWT Decomposition (With Cache)
-        print("Step 2: DWT Decomposition")
-        cache_key_dwt = "step2_dwt_decomposed_signals"
-        if self.cache.exists(cache_key_dwt):
-            p_long, p_short, depth_J = self.cache.load(cache_key_dwt)
-        else:
-            p_long, p_short, depth_J = self.decomposer.decompose_signal(res_signal)
-            self.cache.save(cache_key_dwt, (p_long, p_short, depth_J))
+        # Step 2: DWT Decomposition Progress Bar
+        with tqdm(total=100, desc="[Step 2/5] Discrete Wavelet Decomposition (db4)", unit="%") as pbar2:
+            cache_key_dwt = "step2_dwt_decomposed_signals"
+            if self.cache.exists(cache_key_dwt):
+                p_long, p_short, depth_J = self.cache.load(cache_key_dwt)
+            else:
+                p_long, p_short, depth_J = self.decomposer.decompose_signal(res_signal)
+                self.cache.save(cache_key_dwt, (p_long, p_short, depth_J))
+            pbar2.update(100)
 
-        # Decomposition of individual PV and Wind profiles for detailed evaluation
         pv_long, pv_short, _ = self.decomposer.decompose_signal(pv_signal)
         wind_long, wind_short, _ = self.decomposer.decompose_signal(wind_signal)
 
-        # Step 3: Dual-Path TFT Forecasting (With Cache)
-        print("Step 3: Dual-Path TFT Forecasting")
-        cache_key_tft = "step3_tft_forecasts_metrics"
-        if self.cache.exists(cache_key_tft):
-            metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind = self.cache.load(cache_key_tft)
-        else:
-            # Forecast total RES profile
-            metrics, pred_long, pred_short, history_pv, eval_pv = self.tft_engine.train_and_forecast_single_source(pv_long, pv_short)
-            m_wind, p_wind_l, p_wind_s, history_wind, eval_wind = self.tft_engine.train_and_forecast_single_source(wind_long, wind_short)
-            
-            # Combine overall metrics
-            metrics["MAE"] = float((metrics["MAE"] + m_wind["MAE"]) / 2.0)
-            metrics["RMSE"] = float((metrics["RMSE"] + m_wind["RMSE"]) / 2.0)
-            metrics["R2"] = float((metrics["R2"] + m_wind["R2"]) / 2.0)
+        # Step 3: Dual-Path TFT Forecasting Progress Bar
+        with tqdm(total=100, desc="[Step 3/5] Dual-Path TFT Model Training & Forecasting", unit="%") as pbar3:
+            cache_key_tft = "step3_tft_forecasts_metrics"
+            if self.cache.exists(cache_key_tft):
+                metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind = self.cache.load(cache_key_tft)
+            else:
+                metrics, pred_long, pred_short, history_pv, eval_pv = self.tft_engine.train_and_forecast_single_source(pv_long, pv_short)
+                m_wind, p_wind_l, p_wind_s, history_wind, eval_wind = self.tft_engine.train_and_forecast_single_source(wind_long, wind_short)
+                
+                metrics["MAE"] = float((metrics["MAE"] + m_wind["MAE"]) / 2.0)
+                metrics["RMSE"] = float((metrics["RMSE"] + m_wind["RMSE"]) / 2.0)
+                metrics["R2"] = float((metrics["R2"] + m_wind["R2"]) / 2.0)
 
-            self.cache.save(cache_key_tft, (metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind))
+                self.cache.save(cache_key_tft, (metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind))
+            pbar3.update(100)
 
         self.results_gen.print_and_export_table3(metrics)
         self.results_gen.plot_fig4_tft_losses_and_correlation(history_pv, history_wind, eval_pv, eval_wind)
         self.results_gen.plot_fig5_actual_vs_predicted(eval_pv["y_actual"], eval_pv["y_pred"], eval_wind["y_actual"], eval_wind["y_pred"])
 
-        # Horizon setup
         T = scheduling_horizon_hours
         demand_h = df_clean["load_demand"].to_numpy()[:T] if "load_demand" in df_clean.columns else np.full(T, self.sys_data.base_demand)
         p_long_h = pred_long[:T]
         p_short_h = pred_short[:T]
         num_units = self.bess_cfg.num_units
 
-        # Step 4: Adaptive AOA Siting & Sizing Optimization (With Cache)
-        print("Step 4: Adaptive AOA Optimization")
+        # Step 4: Adaptive AOA Optimization (Progress bar built into solver)
         cache_key_aoa = f"step4_aoa_opt_horizon_{T}"
-        
         if self.cache.exists(cache_key_aoa):
             best_X, best_fitness, conv_curve, pop_fitness_dist = self.cache.load(cache_key_aoa)
         else:
@@ -139,7 +138,7 @@ class DWDBOMasterFramework:
         self.results_gen.print_and_export_table4(opt_buses, opt_capacities, opt_power_ratings)
         self.results_gen.plot_fig6_aoa_convergence(conv_curve)
 
-        # Comparative OPF Evaluation (24h & 48h horizons With/Without BESS)
+        # Comparative OPF Evaluations
         c_op_24, c_inv_24, v_dev_24, l_loss_24, curt_24, commit_24 = self.opf_solver.solve_multi_period_dispatch(
             24, demand_h[:24], p_long_h[:24], opt_buses, opt_capacities
         )
@@ -150,7 +149,6 @@ class DWDBOMasterFramework:
         m24_with = {"C_op": c_op_24, "C_inv": c_inv_24, "V_dev": v_dev_24, "L_loss": l_loss_24, "Curtailment": curt_24}
         m24_wo = {"C_op": c_op_24_wo, "C_inv": 0.0, "V_dev": v_dev_24_wo, "L_loss": l_loss_24_wo, "Curtailment": curt_24_wo}
 
-        # 48h horizon comparison
         demand_48 = df_clean["load_demand"].to_numpy()[:48] if len(df_clean) >= 48 else np.pad(df_clean["load_demand"].to_numpy(), (0, 48 - len(df_clean)), mode='edge')
         p_long_48 = pred_long[:48] if len(pred_long) >= 48 else np.pad(pred_long, (0, 48 - len(pred_long)), mode='edge')
 
@@ -168,16 +166,17 @@ class DWDBOMasterFramework:
         self.results_gen.plot_fig7_performance_comparison(m24_with, m24_wo, m48_with, m48_wo)
         self.results_gen.plot_fig8_generator_commitment(commit_24)
 
-        # Step 5: Lower-Level CVaR & Sensitivity Analysis (With Cache)
-        print("Step 5: Lower-Level CVaR & Sensitivity Analysis")
-        cache_key_cvar = f"step5_cvar_results_{T}"
-        if self.cache.exists(cache_key_cvar):
-            cvar_cost, exp_cost, zeta, cvar_sensitivity = self.cache.load(cache_key_cvar)
-        else:
-            error_scenarios = self.cvar_optimizer.sample_forecast_error_scenarios(float(np.mean(p_short_h)))
-            cvar_cost, exp_cost, zeta = self.cvar_optimizer.optimize_cvar_risk(c_op_24, error_scenarios)
-            cvar_sensitivity = self.cvar_optimizer.run_alpha_sensitivity_analysis(c_op_24, error_scenarios)
-            self.cache.save(cache_key_cvar, (cvar_cost, exp_cost, zeta, cvar_sensitivity))
+        # Step 5: Lower-Level CVaR & Sensitivity Analysis Progress Bar
+        with tqdm(total=100, desc="[Step 5/5] Lower-Level CVaR Risk Optimization & Sensitivity", unit="%") as pbar5:
+            cache_key_cvar = f"step5_cvar_results_{T}"
+            if self.cache.exists(cache_key_cvar):
+                cvar_cost, exp_cost, zeta, cvar_sensitivity = self.cache.load(cache_key_cvar)
+            else:
+                error_scenarios = self.cvar_optimizer.sample_forecast_error_scenarios(float(np.mean(p_short_h)))
+                cvar_cost, exp_cost, zeta = self.cvar_optimizer.optimize_cvar_risk(c_op_24, error_scenarios)
+                cvar_sensitivity = self.cvar_optimizer.run_alpha_sensitivity_analysis(c_op_24, error_scenarios)
+                self.cache.save(cache_key_cvar, (cvar_cost, exp_cost, zeta, cvar_sensitivity))
+            pbar5.update(100)
 
         self.results_gen.print_and_export_table6(cvar_sensitivity)
         self.results_gen.plot_fig9_expected_vs_cvar(cvar_sensitivity)
