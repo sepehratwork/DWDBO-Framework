@@ -1,7 +1,7 @@
 """
 Dual-Path TFT Training and Evaluation Engine.
-Handles 48-hour sliding window construction, PyTorch training loops, 
-loss history tracking, and computes MAE, RMSE, and R2 evaluation metrics (Table 3).
+Handles sliding lookback windows, PyTorch training loops with tqdm progress bar, 
+and computes MAE, RMSE, and R2 evaluation metrics (Table 3).
 """
 
 from typing import Tuple, Dict, Any
@@ -11,6 +11,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
 
 from config import TFTConfig
 from src.models.tft_model import DualPathTFTModel
@@ -30,8 +31,6 @@ class TFTTrainerEngine:
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
             torch.backends.cudnn.benchmark = True
-            if hasattr(torch, "set_float32_matmul_precision"):
-                torch.set_float32_matmul_precision("high")
         else:
             self.device = torch.device("cpu")
 
@@ -55,12 +54,11 @@ class TFTTrainerEngine:
         return np.array(X, dtype=np.float32)[..., np.newaxis], np.array(Y, dtype=np.float32)
 
     def train_and_forecast_single_source(
-        self, p_long: np.ndarray, p_short: np.ndarray
+        self, p_long: np.ndarray, p_short: np.ndarray, source_label: str = "RES"
     ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, Dict[str, list], Dict[str, Any]]:
         """
-        Executes dual-path training for a single RES source (e.g. PV or Wind) on 80% split and tests on 20%.
+        Executes dual-path training with tqdm progress bar.
         """
-        # Standardize long and short series
         scaler_long = StandardScaler()
         scaler_short = StandardScaler()
 
@@ -89,9 +87,16 @@ class TFTTrainerEngine:
         history = {"epoch": [], "loss_total": [], "loss_long": [], "loss_short": []}
 
         self.model.train()
-        print(f"[TFTTrainerEngine] Training for {epochs} epochs on {self.device}...")
+        
+        # tqdm progress bar for TFT Epochs
+        pbar = tqdm(
+            range(1, epochs + 1),
+            desc=f"[Step 3] TFT Training ({source_label})",
+            unit="epoch",
+            bar_format="{l_bar}{bar:30}{r_bar}"
+        )
 
-        for epoch in range(1, epochs + 1):
+        for epoch in pbar:
             running_loss = 0.0
             running_l_loss = 0.0
             running_s_loss = 0.0
@@ -124,8 +129,11 @@ class TFTTrainerEngine:
             history["loss_long"].append(avg_l)
             history["loss_short"].append(avg_s)
 
-            if epoch % 30 == 0 or epoch == epochs:
-                print(f"Epoch {epoch:3d}/{epochs} | Total Loss: {avg_tot:.6f} | Long Loss: {avg_l:.6f} | Short Loss: {avg_s:.6f}")
+            pbar.set_postfix({
+                "Loss": f"{avg_tot:.5f}",
+                "Long MSE": f"{avg_l:.5f}",
+                "Short MSE": f"{avg_s:.5f}"
+            })
 
         # Evaluation on Test Split
         self.model.eval()
@@ -137,7 +145,6 @@ class TFTTrainerEngine:
             pred_l_test_scaled = pred_l_test_scaled.cpu().numpy().reshape(-1, 1)
             pred_s_test_scaled = pred_s_test_scaled.cpu().numpy().reshape(-1, 1)
 
-        # Inverse transform
         pred_long_unscaled = scaler_long.inverse_transform(pred_l_test_scaled).flatten()
         pred_short_unscaled = scaler_short.inverse_transform(pred_s_test_scaled).flatten()
 
@@ -151,7 +158,6 @@ class TFTTrainerEngine:
         rmse = float(np.sqrt(mean_squared_error(y_actual_total, y_pred_total)))
         r2 = float(r2_score(y_actual_total, y_pred_total))
 
-        # Fit correlation line parameters
         slope, intercept = np.polyfit(y_actual_total, y_pred_total, 1)
         r_val = float(np.corrcoef(y_actual_total, y_pred_total)[0, 1])
 
@@ -164,19 +170,10 @@ class TFTTrainerEngine:
             "r_value": r_val
         }
 
-        # Full predictions vector (combining unscaled train and test predictions)
-        full_pred_l = np.zeros(len(p_long))
-        full_pred_s = np.zeros(len(p_short))
-
-        w = getattr(self.cfg, "lookback_window", 48)
-        full_pred_l[w : w + len(pred_long_unscaled)] = pred_long_unscaled
-        full_pred_s[w : w + len(pred_short_unscaled)] = pred_short_unscaled
-
         return metrics, pred_long_unscaled, pred_short_unscaled, history, eval_details
 
     def train_and_forecast(
         self, p_long: np.ndarray, p_short: np.ndarray
     ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray]:
-        """Wrapper method for pipeline compatibility."""
         metrics, pred_l, pred_s, _, _ = self.train_and_forecast_single_source(p_long, p_short)
         return metrics, pred_l, pred_s

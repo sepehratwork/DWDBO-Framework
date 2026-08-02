@@ -6,52 +6,23 @@ MOA and MOP schedules executing Algorithm 1 (Page 6).
 
 from typing import Tuple, List, Callable, Optional
 import numpy as np
-from joblib import Parallel, delayed
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 
 from config import AOAConfig, BESSConfig, ParallelConfig
 
 
-def _update_and_eval_individual(
-    i: int,
-    pop_i: np.ndarray,
-    best_sol: np.ndarray,
-    moa: float,
-    mop: float,
-    total_buses: int,
-    num_bess: int,
-    capacity_max_mwh: float,
-    fitness_func: Callable[[np.ndarray], float]
-) -> Tuple[int, np.ndarray, float]:
-    """Helper top-level function for multiprocessing evaluation of a single individual."""
-    r1, r2, r3 = np.random.rand(), np.random.rand(), np.random.rand()
-    x_new = pop_i.copy()
-
-    # Exploration Phase (Algorithm 1)
-    if r1 < mop:
-        if r3 > 0.5:
-            x_new = pop_i + r2 * (best_sol - pop_i) * moa
-        else:
-            x_new = pop_i - r2 * (best_sol - pop_i) * moa
-    # Exploitation Phase (Algorithm 1)
-    else:
-        if r3 > 0.5:
-            x_new = best_sol + r2 * (best_sol - pop_i)
-        else:
-            x_new = best_sol - r2 * (best_sol - pop_i)
-
-    # Enforce physical constraints and integer bus bounds
-    x_new[:num_bess] = np.clip(np.round(x_new[:num_bess]), 1, total_buses)
-    x_new[num_bess:] = np.clip(x_new[num_bess:], 5.0, capacity_max_mwh)
-
-    fit_new = fitness_func(x_new)
-    return i, x_new, fit_new
+def _eval_individual_worker(args: Tuple[np.ndarray, Callable[[np.ndarray], float]]) -> Tuple[np.ndarray, float]:
+    """Top-level worker function for multiprocessing evaluation of candidate solutions."""
+    candidate, func = args
+    fit = func(candidate)
+    return candidate, fit
 
 
 class AdaptiveAOASolver:
     """
     Implements Adaptive AOA for optimal BESS siting and sizing in transmission networks
-    with parallelized population updates and progress tracking.
+    with parallelized multiprocessing population evaluations.
     """
 
     def __init__(self, config: AOAConfig, bess_config: BESSConfig, total_buses: int = 30,
@@ -85,11 +56,12 @@ class AdaptiveAOASolver:
         """
         pop = self._initialize_population()
         
-        # Parallel initial fitness evaluation
+        # Parallel Initial Population Evaluation
         if self.n_workers > 1:
-            fitness = np.array(Parallel(n_jobs=self.n_workers)(
-                delayed(fitness_func)(ind) for ind in pop
-            ))
+            with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+                futures = [executor.submit(_eval_individual_worker, (ind, fitness_func)) for ind in pop]
+                fitness_results = [f.result()[1] for f in futures]
+            fitness = np.array(fitness_results)
         else:
             fitness = np.array([fitness_func(ind) for ind in pop])
 
@@ -100,41 +72,55 @@ class AdaptiveAOASolver:
         convergence_curve = [best_fit]
         all_evaluated_fitness = list(fitness)
 
-        # Progress bar for AOA optimization
         pbar = tqdm(
             range(1, self.cfg.max_iterations + 1),
-            desc="[Step 4/5] Adaptive AOA Optimization",
+            desc="[Step 4] Adaptive AOA Optimization",
             unit="iter",
-            leave=True
+            bar_format="{l_bar}{bar:30}{r_bar}"
         )
 
         for t in pbar:
-            # Dynamic MOA schedule (Eq. 19)
             moa = self.cfg.moa_min + t * ((self.cfg.moa_max - self.cfg.moa_min) / self.cfg.max_iterations)
-            # Dynamic MOP schedule (Eq. 20)
             mop = 1.0 - (t / self.cfg.max_iterations) ** (1.0 / self.cfg.alpha)
 
-            # Parallelized Population Update & Evaluation (Multiprocessing)
-            if self.n_workers > 1:
-                results = Parallel(n_jobs=self.n_workers)(
-                    delayed(_update_and_eval_individual)(
-                        i, pop[i], best_sol, moa, mop, self.total_buses, self.num_bess,
-                        self.bess_cfg.capacity_max_mwh, fitness_func
-                    )
-                    for i in range(self.cfg.population_size)
-                )
-            else:
-                results = [
-                    _update_and_eval_individual(
-                        i, pop[i], best_sol, moa, mop, self.total_buses, self.num_bess,
-                        self.bess_cfg.capacity_max_mwh, fitness_func
-                    )
-                    for i in range(self.cfg.population_size)
-                ]
+            candidate_batch = []
+            for i in range(self.cfg.population_size):
+                r1, r2, r3 = np.random.rand(), np.random.rand(), np.random.rand()
+                x_new = pop[i, :].copy()
 
-            # Update population state
-            for i, x_new, fit_new in results:
+                if r1 < mop:
+                    if r3 > 0.5:
+                        x_new = pop[i, :] + r2 * (best_sol - pop[i, :]) * moa
+                    else:
+                        x_new = pop[i, :] - r2 * (best_sol - pop[i, :]) * moa
+                else:
+                    if r3 > 0.5:
+                        x_new = best_sol + r2 * (best_sol - pop[i, :])
+                    else:
+                        x_new = best_sol - r2 * (best_sol - pop[i, :])
+
+                x_new[: self.num_bess] = np.clip(np.round(x_new[: self.num_bess]), 1, self.total_buses)
+                x_new[self.num_bess :] = np.clip(
+                    x_new[self.num_bess :], 5.0, self.bess_cfg.capacity_max_mwh
+                )
+                candidate_batch.append(x_new)
+
+            # Parallel Candidate Batch Evaluation
+            if self.n_workers > 1:
+                with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+                    futures = [
+                        executor.submit(_eval_individual_worker, (cand, fitness_func))
+                        for cand in candidate_batch
+                    ]
+                    batch_evals = [f.result()[1] for f in futures]
+            else:
+                batch_evals = [fitness_func(cand) for cand in candidate_batch]
+
+            for i in range(self.cfg.population_size):
+                x_new = candidate_batch[i]
+                fit_new = batch_evals[i]
                 all_evaluated_fitness.append(fit_new)
+
                 if fit_new < fitness[i]:
                     pop[i, :] = x_new
                     fitness[i] = fit_new
@@ -144,18 +130,16 @@ class AdaptiveAOASolver:
 
             convergence_curve.append(best_fit)
 
-            # Update progress bar description with metrics
             pbar.set_postfix({
-                "Best Cost ($)": f"{best_fit:.2f}",
+                "Best Fit": f"{best_fit:.2f}",
                 "MOA": f"{moa:.2f}",
                 "MOP": f"{mop:.2f}"
             })
 
-            # Early stopping check (Eq. 23)
             if t > 1:
                 rel_improvement = abs(convergence_curve[-1] - convergence_curve[-2]) / (abs(convergence_curve[-2]) + 1e-8)
                 if rel_improvement < 1e-6:
-                    pbar.set_postfix({"Status": "Converged (tau < 1e-6)"})
+                    pbar.set_postfix_str(f"Converged at iter {t} (tau < 1e-6)")
                     break
 
         return best_sol, best_fit, convergence_curve, all_evaluated_fitness
