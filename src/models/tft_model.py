@@ -41,20 +41,32 @@ class GatedLinearUnit(nn.Module):
 class GatedResidualNetwork(nn.Module):
     """
     Gated Residual Network (GRN) integrating temporal features with static context cs (Eq. 7).
-    GRN(x, c_s) = LayerNorm(x + GLU(W_1 * ELU(W_2 * x + W_3 * c_s + b_2) + b_1))
+    GRN(x, c_s) = LayerNorm(Residual(x) + GLU(W_2 * ELU(W_1 * x + W_c * c_s + b_1) + b_2))
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, dropout_rate: float = 0.12):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = None, dropout_rate: float = 0.12):
         super().__init__()
+        if hidden_dim is None:
+            hidden_dim = output_dim
+
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, input_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
         self.dropout = nn.Dropout(dropout_rate)
-        self.glu = GatedLinearUnit(input_dim)
-        self.layer_norm = nn.LayerNorm(input_dim)
+        self.glu = GatedLinearUnit(output_dim)
+
+        if input_dim != output_dim:
+            self.res_skip = nn.Linear(input_dim, output_dim)
+        else:
+            self.res_skip = nn.Identity()
+
+        self.layer_norm = nn.LayerNorm(output_dim)
         self.elu = nn.ELU()
 
     def forward(self, x: torch.Tensor, c_s: torch.Tensor = None) -> torch.Tensor:
-        residual = x
+        residual = self.res_skip(x)
         out = self.fc1(x)
         if c_s is not None:
             out = out + c_s
@@ -74,9 +86,9 @@ class VariableSelectionNetwork(nn.Module):
         super().__init__()
         self.num_features = num_features
         self.feature_grns = nn.ModuleList([
-            GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate) for _ in range(num_features)
+            GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate=dropout_rate) for _ in range(num_features)
         ])
-        self.flattened_grn = GatedResidualNetwork(num_features * hidden_dim, hidden_dim, dropout_rate)
+        self.flattened_grn = GatedResidualNetwork(num_features * hidden_dim, hidden_dim, dropout_rate=dropout_rate)
         self.weight_fc = nn.Linear(hidden_dim, num_features)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -117,7 +129,7 @@ class TemporalFusionTransformerPath(nn.Module):
             batch_first=True,
             dropout=dropout_rate if num_layers > 1 else 0.0
         )
-        self.lstm_grn = GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate)
+        self.lstm_grn = GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate=dropout_rate)
         self.pos_encoder = PositionalEncoding(hidden_dim)
 
         self.attention = nn.MultiheadAttention(
@@ -126,8 +138,8 @@ class TemporalFusionTransformerPath(nn.Module):
             dropout=dropout_rate,
             batch_first=True
         )
-        self.post_attention_grn = GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate)
-        self.final_grn = GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate)
+        self.post_attention_grn = GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate=dropout_rate)
+        self.final_grn = GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate=dropout_rate)
         self.fc_out = nn.Linear(hidden_dim, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
