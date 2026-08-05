@@ -136,30 +136,29 @@ class DWDBOMasterFramework:
         print("\n[Framework Step 3/5] Initiating Dual-Path Temporal Fusion Transformer (TFT) Forecasting...")
         cache_key_tft = "step3_tft_forecasts_metrics_v5"
         if self.cache.exists(cache_key_tft):
-            print("  -> Loading cached Dual-Path TFT forecast metrics and predictions.")
+            print("  -> Loading cached TFT forecasting models & predictions.")
             metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind = self.cache.load(cache_key_tft)
         else:
-            with tqdm(total=2, desc="[Step 3 TFT Single-Source Training]", bar_format="{l_bar}{bar:25}{r_bar}") as pbar_tft_stage:
-                pbar_tft_stage.set_postfix_str("Solar PV Model")
+            with tqdm(total=2, desc="[Step 3 Dual-Path TFT Pipeline]", bar_format="{l_bar}{bar:30}{r_bar}") as pbar_tft:
+                pbar_tft.set_postfix_str("Training Dual-Path TFT for Solar PV")
                 metrics_pv, pred_pv_l, pred_pv_s, history_pv, eval_pv = self.tft_engine.train_and_forecast_single_source(
                     pv_long, pv_short, source_label="Solar PV"
                 )
-                pbar_tft_stage.update(1)
+                pbar_tft.update(1)
 
-                pbar_tft_stage.set_postfix_str("Wind Power Model")
+                pbar_tft.set_postfix_str("Training Dual-Path TFT for Wind Power")
                 metrics_wind, pred_wind_l, pred_wind_s, history_wind, eval_wind = self.tft_engine.train_and_forecast_single_source(
                     wind_long, wind_short, source_label="Wind Power"
                 )
-                pbar_tft_stage.update(1)
-
-            pred_long = pred_pv_l + pred_wind_l
-            pred_short = pred_pv_s + pred_wind_s
+                pbar_tft.update(1)
 
             metrics = {
                 "MAE": float((metrics_pv["MAE"] + metrics_wind["MAE"]) / 2.0),
                 "RMSE": float((metrics_pv["RMSE"] + metrics_wind["RMSE"]) / 2.0),
                 "R2": float((metrics_pv["R2"] + metrics_wind["R2"]) / 2.0)
             }
+            pred_long = pred_pv_l + pred_wind_l
+            pred_short = pred_pv_s + pred_wind_s
 
             self.cache.save(cache_key_tft, (metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind))
 

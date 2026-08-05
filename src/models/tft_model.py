@@ -1,30 +1,29 @@
 """
 Temporal Fusion Transformer (TFT) PyTorch Architecture.
-Includes Gated Residual Networks (GRN), Gated Linear Units (GLU), Multi-Head Attention,
-Positional Encoding, and Dual-Path Context Injection as formulated in Equations (7)-(9).
+Includes Gated Residual Networks (GRN), Gated Linear Units (GLU), Variable Selection Networks (VSN),
+Multi-Head Temporal Self-Attention, Positional Encoding, and Dual-Path Structure as formulated in Equations (7)-(9).
 """
 
 import math
-from typing import Optional, Tuple
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class PositionalEncoding(nn.Module):
-    """Injects positional encoding to preserve temporal order across sequences."""
+    """Injects temporal sequence position embeddings into hidden representations."""
 
-    def __init__(self, d_model: int, max_len: int = 500):
+    def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe.unsqueeze(0))
+        self.register_buffer("pe", pe.unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, seq_len, d_model)
-        return x + self.pe[:, :x.size(1)]
+        return x + self.pe[:, : x.size(1)]
 
 
 class GatedLinearUnit(nn.Module):
@@ -41,132 +40,131 @@ class GatedLinearUnit(nn.Module):
 
 class GatedResidualNetwork(nn.Module):
     """
-    Gated Residual Network (GRN) integrating temporal features with static/cross-path context (Eq. 7).
-    GRN(x, c) = LayerNorm(x + GLU(W2 * ELU(W1 * x + Wc * c + b1) + b2))
+    Gated Residual Network (GRN) integrating temporal features with static context cs (Eq. 7).
+    GRN(x, c_s) = LayerNorm(x + GLU(W_1 * ELU(W_2 * x + W_3 * c_s + b_2) + b_1))
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, context_dim: Optional[int] = None, dropout_rate: float = 0.12):
+    def __init__(self, input_dim: int, hidden_dim: int, dropout_rate: float = 0.12):
         super().__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        if context_dim is not None:
-            self.context_fc = nn.Linear(context_dim, hidden_dim, bias=False)
-        else:
-            self.context_fc = None
-        self.elu = nn.ELU()
         self.fc2 = nn.Linear(hidden_dim, input_dim)
         self.dropout = nn.Dropout(dropout_rate)
         self.glu = GatedLinearUnit(input_dim)
         self.layer_norm = nn.LayerNorm(input_dim)
+        self.elu = nn.ELU()
 
-    def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, c_s: torch.Tensor = None) -> torch.Tensor:
         residual = x
         out = self.fc1(x)
-        if context is not None and self.context_fc is not None:
-            if context.dim() == 2 and x.dim() == 3:
-                c = self.context_fc(context).unsqueeze(1)
-            else:
-                c = self.context_fc(context)
-            out = out + c
+        if c_s is not None:
+            out = out + c_s
         out = self.elu(out)
         out = self.fc2(out)
         out = self.dropout(out)
         out = self.glu(out)
-        # Element-wise feature selection / gating (Eq. 7)
         return self.layer_norm(residual + out)
+
+
+class VariableSelectionNetwork(nn.Module):
+    """
+    Variable Selection Network (VSN) providing instance-wise feature selection and dynamic weighting.
+    """
+
+    def __init__(self, num_features: int, hidden_dim: int, dropout_rate: float = 0.12):
+        super().__init__()
+        self.num_features = num_features
+        self.feature_grns = nn.ModuleList([
+            GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate) for _ in range(num_features)
+        ])
+        self.flattened_grn = GatedResidualNetwork(num_features * hidden_dim, hidden_dim, dropout_rate)
+        self.weight_fc = nn.Linear(hidden_dim, num_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (batch_size, seq_len, num_features, hidden_dim)
+        processed_features = []
+        for i in range(self.num_features):
+            processed_features.append(self.feature_grns[i](x[:, :, i, :]))
+
+        flat = torch.cat(processed_features, dim=-1)
+        weights = self.weight_fc(self.flattened_grn(flat))
+        weights = F.softmax(weights, dim=-1).unsqueeze(-1)
+
+        stacked = torch.stack(processed_features, dim=2)
+        selected = torch.sum(weights * stacked, dim=2)
+        return selected
 
 
 class TemporalFusionTransformerPath(nn.Module):
     """
-    Single-Path TFT module with positional encoding, multi-head self-attention,
-    GRN feature gating, and temporal context extraction (Eq. 8 & Eq. 9).
+    Single-Path TFT module with Variable Selection, LSTM locality enhancement,
+    Multi-Head Temporal Self-Attention, and Gated Residual Networks.
     """
 
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        num_heads: int,
-        num_layers: int,
-        dropout_rate: float = 0.12,
-        context_dim: Optional[int] = None
-    ):
+    def __init__(self, input_dim: int, hidden_dim: int, num_heads: int, num_layers: int, dropout_rate: float):
         super().__init__()
+        self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.input_layer = nn.Linear(input_dim, hidden_dim)
+
+        self.feature_embed = nn.ModuleList([
+            nn.Linear(1, hidden_dim) for _ in range(input_dim)
+        ])
+        self.vsn = VariableSelectionNetwork(input_dim, hidden_dim, dropout_rate)
+
+        self.lstm = nn.LSTM(
+            input_size=hidden_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout_rate if num_layers > 1 else 0.0
+        )
+        self.lstm_grn = GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate)
         self.pos_encoder = PositionalEncoding(hidden_dim)
-        self.grn_input = GatedResidualNetwork(hidden_dim, hidden_dim, context_dim=context_dim, dropout_rate=dropout_rate)
 
-        # Multi-Head Self-Attention Layer
-        self.mha = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, dropout=dropout_rate, batch_first=True)
-        self.glu_attn = GatedLinearUnit(hidden_dim)
-        self.norm_attn = nn.LayerNorm(hidden_dim)
-
-        # Post-Attention GRN
-        self.grn_post = GatedResidualNetwork(hidden_dim, hidden_dim, context_dim=context_dim, dropout_rate=dropout_rate)
-
-        # Output Forecast Layer
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout_rate,
+            batch_first=True
+        )
+        self.post_attention_grn = GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate)
+        self.final_grn = GatedResidualNetwork(hidden_dim, hidden_dim, dropout_rate)
         self.fc_out = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x shape: (batch_size, seq_len, input_dim)
-        h = self.input_layer(x)
-        h = self.pos_encoder(h)
-        h = self.grn_input(h, context=context)
+        batch_size, seq_len, feature_dim = x.shape
 
-        # Self-Attention Gating Residual Connection
-        attn_out, _ = self.mha(h, h, h)
-        h = self.norm_attn(h + self.glu_attn(attn_out))
+        embedded = []
+        for i in range(feature_dim):
+            feat_i = x[:, :, i : i + 1]
+            embedded.append(self.feature_embed[i](feat_i))
+        stacked = torch.stack(embedded, dim=2)
+        selected = self.vsn(stacked)
 
-        # Post-Attention GRN
-        h = self.grn_post(h, context=context)
+        lstm_out, _ = self.lstm(selected)
+        lstm_out = self.lstm_grn(lstm_out)
 
-        # Extract last hidden temporal state as context vector
-        h_context = h[:, -1, :]
-        out = self.fc_out(h_context).squeeze(-1)
+        attn_input = self.pos_encoder(lstm_out)
+        attn_out, _ = self.attention(attn_input, attn_input, attn_input)
+        attn_out = self.post_attention_grn(attn_out + lstm_out)
 
-        return out, h_context
+        final_out = self.final_grn(attn_out[:, -1, :])
+        out = self.fc_out(final_out)
+        return out.squeeze(-1)
 
 
 class DualPathTFTModel(nn.Module):
     """
     Dual-Path Temporal Fusion Transformer framework separately predicting
-    Long-term approximation (Eq. 8) and Short-term fluctuations (Eq. 9) with cross-path context injection.
+    Long-term approximation (Eq. 8) and Short-term fluctuations (Eq. 9).
     """
 
-    def __init__(
-        self,
-        input_dim: int = 3,
-        hidden_dim: int = 32,
-        num_heads: int = 2,
-        num_layers: int = 2,
-        dropout_rate: float = 0.12
-    ):
+    def __init__(self, input_dim: int = 3, hidden_dim: int = 32, num_heads: int = 2, num_layers: int = 2, dropout_rate: float = 0.12):
         super().__init__()
-        # Long-term path (Eq. 8)
-        self.tft_long = TemporalFusionTransformerPath(
-            input_dim=input_dim,
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            dropout_rate=dropout_rate,
-            context_dim=None
-        )
+        self.tft_long = TemporalFusionTransformerPath(input_dim, hidden_dim, num_heads, num_layers, dropout_rate)
+        self.tft_short = TemporalFusionTransformerPath(input_dim, hidden_dim, num_heads, num_layers, dropout_rate)
 
-        # Short-term path conditioned on long-term context (Eq. 9)
-        self.tft_short = TemporalFusionTransformerPath(
-            input_dim=input_dim,
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            dropout_rate=dropout_rate,
-            context_dim=hidden_dim
-        )
-
-    def forward(self, x_long: torch.Tensor, x_short: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Long-term prediction and temporal context extraction (Eq. 8)
-        pred_long, context_long = self.tft_long(x_long)
-        # Short-term prediction injected with long-term context (Eq. 9)
-        pred_short, _ = self.tft_short(x_short, context=context_long)
+    def forward(self, x_long: torch.Tensor, x_short: torch.Tensor):
+        pred_long = self.tft_long(x_long)
+        pred_short = self.tft_short(x_short)
         return pred_long, pred_short
