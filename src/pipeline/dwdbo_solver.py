@@ -131,30 +131,41 @@ class DWDBOMasterFramework:
         print(f"  -> DWT Decomposition complete at depth J={depth_J}. P_long (Eq. 5) & P_short (Eq. 6) extracted successfully.")
 
         # ---------------------------------------------------------------------
-        # STEP 3: Dual-Path TFT Forecasting
+        # STEP 3: Dual-Path TFT Forecasting (Section 3.3 & Eq. 7-9)
         # ---------------------------------------------------------------------
-        cache_key_tft = "step3_tft_forecasts_metrics"
+        print("\n[Framework Step 3/5] Initiating Dual-Path Temporal Fusion Transformer (TFT) Forecasting...")
+        cache_key_tft = "step3_tft_forecasts_metrics_v5"
         if self.cache.exists(cache_key_tft):
+            print("  -> Loading cached Dual-Path TFT forecast metrics and predictions.")
             metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind = self.cache.load(cache_key_tft)
         else:
-            metrics, pred_long, pred_short, history_pv, eval_pv = self.tft_engine.train_and_forecast_single_source(pv_long, pv_short, source_label="Solar PV")
-            m_wind, p_wind_l, p_wind_s, history_wind, eval_wind = self.tft_engine.train_and_forecast_single_source(wind_long, wind_short, source_label="Wind Power")
-            
-            metrics["MAE"] = float((metrics["MAE"] + m_wind["MAE"]) / 2.0)
-            metrics["RMSE"] = float((metrics["RMSE"] + m_wind["RMSE"]) / 2.0)
-            metrics["R2"] = float((metrics["R2"] + m_wind["R2"]) / 2.0)
+            with tqdm(total=2, desc="[Step 3 TFT Single-Source Training]", bar_format="{l_bar}{bar:25}{r_bar}") as pbar_tft_stage:
+                pbar_tft_stage.set_postfix_str("Solar PV Model")
+                metrics_pv, pred_pv_l, pred_pv_s, history_pv, eval_pv = self.tft_engine.train_and_forecast_single_source(
+                    pv_long, pv_short, source_label="Solar PV"
+                )
+                pbar_tft_stage.update(1)
+
+                pbar_tft_stage.set_postfix_str("Wind Power Model")
+                metrics_wind, pred_wind_l, pred_wind_s, history_wind, eval_wind = self.tft_engine.train_and_forecast_single_source(
+                    wind_long, wind_short, source_label="Wind Power"
+                )
+                pbar_tft_stage.update(1)
+
+            pred_long = pred_pv_l + pred_wind_l
+            pred_short = pred_pv_s + pred_wind_s
+
+            metrics = {
+                "MAE": float((metrics_pv["MAE"] + metrics_wind["MAE"]) / 2.0),
+                "RMSE": float((metrics_pv["RMSE"] + metrics_wind["RMSE"]) / 2.0),
+                "R2": float((metrics_pv["R2"] + metrics_wind["R2"]) / 2.0)
+            }
 
             self.cache.save(cache_key_tft, (metrics, pred_long, pred_short, history_pv, history_wind, eval_pv, eval_wind))
 
         self.results_gen.print_and_export_table3(metrics)
         self.results_gen.plot_fig4_tft_losses_and_correlation(history_pv, history_wind, eval_pv, eval_wind)
         self.results_gen.plot_fig5_actual_vs_predicted(eval_pv["y_actual"], eval_pv["y_pred"], eval_wind["y_actual"], eval_wind["y_pred"])
-
-        T = scheduling_horizon_hours
-        demand_h = df_clean[load_cols[0]].to_numpy()[:T] if load_cols else np.full(T, self.sys_data.base_demand)
-        p_long_h = pred_long[:T]
-        p_short_h = pred_short[:T]
-        num_units = self.bess_cfg.num_units
 
         # # ---------------------------------------------------------------------
         # # STEP 4: Upper-Level Adaptive AOA Siting & Sizing Optimization

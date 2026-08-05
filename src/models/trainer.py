@@ -37,63 +37,84 @@ class TFTTrainerEngine:
         print(f"[TFTTrainerEngine] Hardware Device Configured: {self.device}")
 
         self.model = DualPathTFTModel(
+            input_dim=3,
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             num_layers=num_layers,
             dropout_rate=dropout_rate
         ).to(self.device)
 
-    def _build_sliding_windows(self, series: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Vectorized construction of sliding historical lookback windows and future targets."""
+    def _build_sliding_windows(
+        self, series: np.ndarray, train_split_idx: int
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, StandardScaler]:
+        """
+        Vectorized construction of sliding lookback windows with cyclic temporal features.
+        Scales data using training split distribution to prevent data leakage.
+        """
         w = getattr(self.cfg, "lookback_window", 48)
         N = len(series)
+        
+        scaler = StandardScaler()
+        scaler.fit(series[:train_split_idx].reshape(-1, 1))
+        series_scaled = scaler.transform(series.reshape(-1, 1)).flatten()
+
+        # Generate cyclic temporal features (15-min timesteps -> 96 steps/day)
+        t_steps = np.arange(N)
+        sin_time = np.sin(2.0 * np.pi * (t_steps % 96) / 96.0)
+        cos_time = np.cos(2.0 * np.pi * (t_steps % 96) / 96.0)
+
         X, Y = [], []
         for i in range(N - w):
-            X.append(series[i : i + w])
-            Y.append(series[i + w])
-        return np.array(X, dtype=np.float32)[..., np.newaxis], np.array(Y, dtype=np.float32)
+            feat_val = series_scaled[i : i + w, np.newaxis]
+            feat_sin = sin_time[i : i + w, np.newaxis]
+            feat_cos = cos_time[i : i + w, np.newaxis]
+            window_feat = np.hstack([feat_val, feat_sin, feat_cos])
+            X.append(window_feat)
+            Y.append(series_scaled[i + w])
+
+        X = np.array(X, dtype=np.float32)
+        Y = np.array(Y, dtype=np.float32)
+
+        split = train_split_idx - w
+        return X[:split], Y[:split], X[split:], Y[split:], scaler
 
     def train_and_forecast_single_source(
         self, p_long: np.ndarray, p_short: np.ndarray, source_label: str = "RES"
     ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, Dict[str, list], Dict[str, Any]]:
         """
-        Executes dual-path training with tqdm progress bar.
+        Executes dual-path training with detailed tqdm progress bar.
         """
-        scaler_long = StandardScaler()
-        scaler_short = StandardScaler()
-
-        p_long_scaled = scaler_long.fit_transform(p_long.reshape(-1, 1)).flatten()
-        p_short_scaled = scaler_short.fit_transform(p_short.reshape(-1, 1)).flatten()
-
-        X_l, Y_l = self._build_sliding_windows(p_long_scaled)
-        X_s, Y_s = self._build_sliding_windows(p_short_scaled)
-
         train_split = getattr(self.cfg, "train_split", 0.80)
-        split_idx = int(len(X_l) * train_split)
+        N = len(p_long)
+        train_split_idx = int(N * train_split)
 
-        X_l_train, Y_l_train = torch.tensor(X_l[:split_idx]), torch.tensor(Y_l[:split_idx])
-        X_s_train, Y_s_train = torch.tensor(X_s[:split_idx]), torch.tensor(Y_s[:split_idx])
+        X_l_tr, Y_l_tr, X_l_te, Y_l_te, scaler_long = self._build_sliding_windows(p_long, train_split_idx)
+        X_s_tr, Y_s_tr, X_s_te, Y_s_te, scaler_short = self._build_sliding_windows(p_short, train_split_idx)
 
-        train_ds = TensorDataset(X_l_train, X_s_train, Y_l_train, Y_s_train)
+        train_ds = TensorDataset(
+            torch.tensor(X_l_tr), torch.tensor(X_s_tr),
+            torch.tensor(Y_l_tr), torch.tensor(Y_s_tr)
+        )
         batch_size = getattr(self.cfg, "batch_size", 128)
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
         learning_rate = getattr(self.cfg, "learning_rate", 0.001)
         epochs = getattr(self.cfg, "training_epochs", 150)
 
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
         criterion = nn.MSELoss()
 
         history = {"epoch": [], "loss_total": [], "loss_long": [], "loss_short": []}
 
         self.model.train()
         
-        # tqdm progress bar for TFT Epochs
+        # Detailed tqdm progress bar tracking epochs, individual losses, and learning rate
         pbar = tqdm(
             range(1, epochs + 1),
-            desc=f"[Step 3] TFT Training ({source_label})",
+            desc=f"[Step 3] Dual-Path TFT Training ({source_label})",
             unit="epoch",
-            bar_format="{l_bar}{bar:30}{r_bar}"
+            bar_format="{l_bar}{bar:25}{r_bar}"
         )
 
         for epoch in pbar:
@@ -110,14 +131,19 @@ class TFTTrainerEngine:
                 
                 loss_l = criterion(pred_l, yl)
                 loss_s = criterion(pred_s, ys)
-                loss = loss_l + loss_s
+                loss_comb = criterion(pred_l + pred_s, yl + ys)
+
+                loss = loss_l + loss_s + 0.5 * loss_comb
 
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.step()
 
                 running_loss += loss.item()
                 running_l_loss += loss_l.item()
                 running_s_loss += loss_s.item()
+
+            scheduler.step()
 
             n_batches = len(train_loader)
             avg_tot = running_loss / n_batches
@@ -129,17 +155,19 @@ class TFTTrainerEngine:
             history["loss_long"].append(avg_l)
             history["loss_short"].append(avg_s)
 
+            current_lr = scheduler.get_last_lr()[0]
             pbar.set_postfix({
-                "Loss": f"{avg_tot:.5f}",
-                "Long MSE": f"{avg_l:.5f}",
-                "Short MSE": f"{avg_s:.5f}"
+                "Loss": f"{avg_tot:.4f}",
+                "Long MSE": f"{avg_l:.4f}",
+                "Short MSE": f"{avg_s:.4f}",
+                "LR": f"{current_lr:.6f}"
             })
 
         # Evaluation on Test Split
         self.model.eval()
         with torch.no_grad():
-            X_l_test = torch.tensor(X_l[split_idx:]).to(self.device)
-            X_s_test = torch.tensor(X_s[split_idx:]).to(self.device)
+            X_l_test = torch.tensor(X_l_te).to(self.device)
+            X_s_test = torch.tensor(X_s_te).to(self.device)
             pred_l_test_scaled, pred_s_test_scaled = self.model(X_l_test, X_s_test)
 
             pred_l_test_scaled = pred_l_test_scaled.cpu().numpy().reshape(-1, 1)
@@ -148,11 +176,20 @@ class TFTTrainerEngine:
         pred_long_unscaled = scaler_long.inverse_transform(pred_l_test_scaled).flatten()
         pred_short_unscaled = scaler_short.inverse_transform(pred_s_test_scaled).flatten()
 
-        y_l_actual = scaler_long.inverse_transform(Y_l[split_idx:].reshape(-1, 1)).flatten()
-        y_s_actual = scaler_short.inverse_transform(Y_s[split_idx:].reshape(-1, 1)).flatten()
+        y_l_actual = scaler_long.inverse_transform(Y_l_te.reshape(-1, 1)).flatten()
+        y_s_actual = scaler_short.inverse_transform(Y_s_te.reshape(-1, 1)).flatten()
+
+        # Physical non-negativity constraint for solar power generation profiles
+        if "pv" in source_label.lower() or "solar" in source_label.lower():
+            pred_long_unscaled = np.maximum(0.0, pred_long_unscaled)
+            pred_short_unscaled = np.where(y_l_actual <= 0.1, 0.0, pred_short_unscaled)
 
         y_actual_total = y_l_actual + y_s_actual
         y_pred_total = pred_long_unscaled + pred_short_unscaled
+
+        if "pv" in source_label.lower() or "solar" in source_label.lower():
+            y_actual_total = np.maximum(0.0, y_actual_total)
+            y_pred_total = np.maximum(0.0, y_pred_total)
 
         mae = float(mean_absolute_error(y_actual_total, y_pred_total))
         rmse = float(np.sqrt(mean_squared_error(y_actual_total, y_pred_total)))

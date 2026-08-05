@@ -154,7 +154,7 @@ class PaperResultsGenerator:
         eval_pv: Dict[str, Any],
         eval_wind: Dict[str, Any]
     ) -> None:
-        """Generates Fig. 4: Training loss convergence and correlation plots for PV and Wind."""
+        """Generates Fig. 4: Training loss convergence and correlation plots for PV and Wind matching paper format."""
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
         # (a) PV Training Loss & Correlation
