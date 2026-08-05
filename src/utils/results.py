@@ -108,28 +108,43 @@ class PaperResultsGenerator:
     # -------------------------------------------------------------------------
 
     def plot_fig3_knn_imputation(self, df_raw: pd.DataFrame, df_imputed: pd.DataFrame) -> None:
-        """Generates Fig. 3: Performance of KNN imputer in filling missing values."""
+        """
+        Generates Fig. 3: Performance of KNN imputer in filling missing values (Section 3.1 & Figure 3).
+        Matches the exact paper visual configuration: 3 subplots for Load, Wind, and Solar.
+        """
         fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
         
-        cols = ["load_demand", "wind_power", "solar_power"]
+        # Identify appropriate feature columns
+        load_cols = [c for c in df_raw.columns if any(kw in c.lower() for kw in ["load", "demand"])]
+        wind_cols = [c for c in df_raw.columns if "wind" in c.lower()]
+        solar_cols = [c for c in df_raw.columns if any(kw in c.lower() for kw in ["solar", "pv", "generation_actual"]) and "wind" not in c.lower()]
+
+        col_load = load_cols[0] if load_cols else df_raw.columns[0]
+        col_wind = wind_cols[0] if wind_cols else (df_raw.columns[1] if len(df_raw.columns) > 1 else df_raw.columns[0])
+        col_solar = solar_cols[0] if solar_cols else (df_raw.columns[2] if len(df_raw.columns) > 2 else df_raw.columns[0])
+
+        cols = [col_load, col_wind, col_solar]
         titles = ["Largest NaN gap - Day-ahead Load", "Largest NaN gap - Actual Wind", "Largest NaN gap - DE_solar_generation_actual"]
+        
+        sample_range = slice(100, 350)
         
         for i, col in enumerate(cols):
             ax = axes[i]
-            sample_range = slice(100, 350)
             
-            y_raw = df_raw[col].iloc[sample_range].to_numpy() if col in df_raw.columns else df_raw.iloc[:, 0].iloc[sample_range].to_numpy()
-            y_imp = df_imputed[col].iloc[sample_range].to_numpy() if col in df_imputed.columns else df_imputed.iloc[:, 0].iloc[sample_range].to_numpy()
+            y_raw = df_raw[col].iloc[sample_range].to_numpy().copy() if col in df_raw.columns else df_raw.iloc[sample_range, 0].to_numpy().copy()
+            y_imp = df_imputed[col].iloc[sample_range].to_numpy().copy() if col in df_imputed.columns else df_imputed.iloc[sample_range, 0].to_numpy().copy()
             x_axis = np.arange(len(y_raw))
 
-            ax.plot(x_axis, y_raw, label="Actual/Raw", color="tab:blue", lw=2)
-            ax.plot(x_axis, y_imp, label="KNN imputed (gap)", color="tab:red", linestyle=":", lw=1.5)
+            # Plot raw signal (solid line) and KNN imputed signal (red dotted line)
+            ax.plot(x_axis, y_raw, label="Actual/Raw", color="#1f77b4", lw=2)
+            ax.plot(x_axis, y_imp, label="KNN imputed (gap)", color="#d62728", linestyle=":", lw=1.8)
             ax.set_title(titles[i], fontsize=10, fontweight="bold")
-            ax.legend(loc="upper right", fontsize=8)
+            ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
             ax.grid(True, linestyle="--", alpha=0.5)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(self.cfg.results_dir, "Fig_3_KNN_Imputation.png"), dpi=self.cfg.figure_dpi)
+        fig_path = os.path.join(self.cfg.results_dir, "Fig_3_KNN_Imputation.png")
+        plt.savefig(fig_path, dpi=self.cfg.figure_dpi, bbox_inches="tight")
         plt.close()
 
     def plot_fig4_tft_losses_and_correlation(

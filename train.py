@@ -66,19 +66,19 @@ def main():
     # Execute Complete 24-Hour Pipeline
     results = solver.execute_framework(raw_opsd_data, scheduling_horizon_hours=24)
 
-    total_time = time.perf_counter() - start_time
+    # total_time = time.perf_counter() - start_time
 
-    print("\n------------------------------------------------------------------------------------------")
-    print(" SIMULATION SUMMARY RESULTS ")
-    print("------------------------------------------------------------------------------------------")
-    print(f"Optimal BESS Bus Locations     : Bus {results['optimal_bess_buses'][0]} and Bus {results['optimal_bess_buses'][1]}")
-    print(f"Optimal BESS Capacities (MWh)  : {results['optimal_bess_capacities_mwh'][0]:.2f} MWh, {results['optimal_bess_capacities_mwh'][1]:.2f} MWh")
-    print(f"Total Operational Cost ($)     : ${results['operating_cost']:.2f}")
-    print(f"Expected System Cost ($)       : ${results['expected_cost']:.2f}")
-    print(f"CVaR Risk Cost (Alpha=0.95) ($): ${results['cvar_cost']:.2f}")
-    print(f"Value-at-Risk Threshold ($)    : ${results['var_threshold_zeta']:.2f}")
-    print(f"Total Pipeline Execution Time  : {total_time:.2f} seconds")
-    print("==========================================================================================")
+    # print("\n------------------------------------------------------------------------------------------")
+    # print(" SIMULATION SUMMARY RESULTS ")
+    # print("------------------------------------------------------------------------------------------")
+    # print(f"Optimal BESS Bus Locations     : Bus {results['optimal_bess_buses'][0]} and Bus {results['optimal_bess_buses'][1]}")
+    # print(f"Optimal BESS Capacities (MWh)  : {results['optimal_bess_capacities_mwh'][0]:.2f} MWh, {results['optimal_bess_capacities_mwh'][1]:.2f} MWh")
+    # print(f"Total Operational Cost ($)     : ${results['operating_cost']:.2f}")
+    # print(f"Expected System Cost ($)       : ${results['expected_cost']:.2f}")
+    # print(f"CVaR Risk Cost (Alpha=0.95) ($): ${results['cvar_cost']:.2f}")
+    # print(f"Value-at-Risk Threshold ($)    : ${results['var_threshold_zeta']:.2f}")
+    # print(f"Total Pipeline Execution Time  : {total_time:.2f} seconds")
+    # print("==========================================================================================")
 
 
 if __name__ == "__main__":
