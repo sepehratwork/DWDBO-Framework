@@ -7,6 +7,7 @@ as defined in Equations (16)-(18) with parallel sensitivity evaluations.
 from typing import Tuple, List, Dict, Optional
 import numpy as np
 from scipy.optimize import minimize
+from tqdm import tqdm
 
 from config import CVaRConfig, ParallelConfig
 
@@ -14,7 +15,7 @@ from config import CVaRConfig, ParallelConfig
 class CVaRRealTimeOptimizer:
     """
     Computes CVaR risk metric at confidence level alpha and optimizes short-term
-    BESS real-time balancing adjustments.
+    BESS real-time balancing adjustments (Eq. 16 - Eq. 18).
     """
 
     def __init__(self, config: CVaRConfig, parallel_config: Optional[ParallelConfig] = None):
@@ -34,7 +35,7 @@ class CVaRRealTimeOptimizer:
         """
         Solves CVaR linear programming problem (Eq. 16-17).
 
-        :param base_operating_cost: Upper-level expected cost ($).
+        :param base_operating_cost: Upper-level expected operational cost ($).
         :param error_scenarios: Short-term fluctuation scenario vector (MW).
         :param alpha_override: Optional specific alpha confidence level.
         :return: Tuple of (cvar_cost, expected_cost, var_threshold_zeta).
@@ -46,14 +47,16 @@ class CVaRRealTimeOptimizer:
         # Real-time imbalance scenario cost
         scenario_costs = base_operating_cost + np.abs(error_scenarios) * 12.5
 
-        def cvar_obj(x):
+        def cvar_obj(x: np.ndarray) -> float:
             zeta = x[0]
             eta = x[1:]
-            return zeta + (1.0 / (1.0 - alpha)) * np.sum(pi_s * eta)
+            return float(zeta + (1.0 / (1.0 - alpha)) * np.sum(pi_s * eta))
 
         constraints = []
         for s in range(N_s):
-            constraints.append({'type': 'ineq', 'fun': lambda x, s=s: x[1 + s] - (scenario_costs[s] - x[0])})
+            def make_cvar_rule(scenario_idx):
+                return lambda x: x[1 + scenario_idx] - (scenario_costs[scenario_idx] - x[0])
+            constraints.append({'type': 'ineq', 'fun': make_cvar_rule(s)})
 
         bounds = [(None, None)] + [(0.0, None)] * N_s
         x0 = np.zeros(1 + N_s)
@@ -69,7 +72,7 @@ class CVaRRealTimeOptimizer:
 
     def run_alpha_sensitivity_analysis(self, base_operating_cost: float, error_scenarios: np.ndarray) -> List[Dict[str, float]]:
         """
-        Computes CVaR impact across multiple alpha confidence levels (Table 6).
+        Computes CVaR impact across multiple alpha confidence levels (Table 6 & Fig. 9).
 
         :param base_operating_cost: Base operational cost.
         :param error_scenarios: Forecast error distribution scenarios.
@@ -77,8 +80,11 @@ class CVaRRealTimeOptimizer:
         """
         alphas = self.cfg.alpha_sensitivity_levels
         results = []
-        for a in alphas:
+
+        pbar_sens = tqdm(alphas, desc="[Step 5] CVaR Risk Sensitivity Analysis", unit="alpha", bar_format="{l_bar}{bar:30}{r_bar}")
+        for a in pbar_sens:
             cvar, exp_cost, zeta = self.optimize_cvar_risk(base_operating_cost, error_scenarios, alpha_override=a)
+            pbar_sens.set_postfix({"alpha": f"{a:.2f}", "CVaR ($)": f"{cvar:.2f}"})
             results.append({
                 "Confidence Level alpha": a,
                 "Expected Cost ($)": round(exp_cost, 2),

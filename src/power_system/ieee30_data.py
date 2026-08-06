@@ -1,11 +1,11 @@
 """
 IEEE 30-Bus Network Technical Parameters & Grid Physics.
 Defines 6 generator quadratic costs, ramp rates, output capacity bounds, 
-and susceptance matrix for power flow, losses, and voltage calculations.
+bus load distributions, and susceptance matrix for power flow, losses, and voltage calculations.
 """
 
-import numpy as np
 from typing import Tuple
+import numpy as np
 
 
 class IEEE30BusData:
@@ -14,12 +14,12 @@ class IEEE30BusData:
     def __init__(self):
         self.num_buses = 30
         self.num_generators = 6
-        
+
         # Generator Bus Index Locations: [Bus 1, Bus 2, Bus 5, Bus 8, Bus 11, Bus 13] (0-indexed: 0, 1, 4, 7, 10, 12)
         self.gen_buses = np.array([1, 2, 5, 8, 11, 13])
         self.gen_bus_indices = self.gen_buses - 1
 
-        # Quadratic Cost Coefficients: a_g ($/MW^2), b_g ($/MW), c_g ($) (Section 2.4)
+        # Quadratic Cost Coefficients: a_g ($/MW^2), b_g ($/MW), c_g ($) (Section 2.4, Eq. 10)
         self.cost_a = np.array([0.00375, 0.01750, 0.06250, 0.00834, 0.02500, 0.02500])
         self.cost_b = np.array([2.00000, 1.75000, 1.00000, 3.25000, 3.00000, 3.00000])
         self.cost_c = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -33,6 +33,14 @@ class IEEE30BusData:
 
         # Base system load demand (MW)
         self.base_demand = 189.2
+
+        # Standard IEEE 30-bus active load distribution vector (MW per bus)
+        base_bus_loads = np.array([
+            0.0, 21.7, 2.4, 7.6, 0.0, 0.0, 22.8, 30.0, 0.0, 5.8,
+            0.0, 11.2, 0.0, 6.2, 8.2, 3.5, 9.0, 3.2, 9.5, 2.2,
+            17.5, 0.0, 3.2, 8.7, 0.0, 3.5, 0.0, 0.0, 2.4, 10.6
+        ])
+        self.bus_load_weights = base_bus_loads / np.sum(base_bus_loads)
 
         # IEEE 30-bus transmission line network parameters (from_bus, to_bus, r, x)
         self.branch_data = np.array([
@@ -94,5 +102,5 @@ class IEEE30BusData:
 
         # Voltage magnitude deviation approximation V_dev = sum |V_i - 1.0|
         v_dev_sum = np.sum(np.abs(0.05 * (p_pu - np.mean(p_pu)))) + 9.056
-        
+
         return float(v_dev_sum), float(loss_sum)
